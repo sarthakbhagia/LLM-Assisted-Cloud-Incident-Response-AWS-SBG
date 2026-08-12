@@ -1,0 +1,673 @@
+{
+  "@@locale": "en",
+  "appName": "KaamSetu",
+  "@appName": {
+    "description": "App Name"
+  },
+  "appTagline": "Daily Workforce Dispatch & Operations System",
+  "@appTagline": {
+    "description": "App Tagline"
+  },
+  "navDashboard": "Dashboard",
+  "@navDashboard": {
+    "description": "Bottom navigation dashboard item label"
+  },
+  "navJobPostings": "Job Postings",
+  "@navJobPostings": {
+    "description": "Bottom navigation job postings item label"
+  },
+  "navProfile": "Profile",
+  "@navProfile": {
+    "description": "Bottom navigation profile item label"
+  },
+  "dashboardEmployerHeadline": "What daily service do you need done today?",
+  "@dashboardEmployerHeadline": {
+    "description": "Dashboard hero headline for employer role"
+  },
+  "dashboardWorkerHeadline": "Active Job Ledger & Direct Hires",
+  "@dashboardWorkerHeadline": {
+    "description": "Dashboard hero headline for worker role"
+  },
+  "dashboardEmployerSubhead": "Connect with 1,200+ local daily-wage specialists",
+  "@dashboardEmployerSubhead": {
+    "description": "Dashboard hero subhead for employer role"
+  },
+  "dashboardWorkerSubhead": "Set your rate and view nearby daily postings",
+  "@dashboardWorkerSubhead": {
+    "description": "Dashboard hero subhead for worker role"
+  },
+  "dashboardEmployerSearchPlaceholder": "Search \"House Painting\", \"Plumbing\"...",
+  "@dashboardEmployerSearchPlaceholder": {
+    "description": "Search input placeholder for employer"
+  },
+  "dashboardWorkerSearchPlaceholder": "Search jobs near Indiranagar...",
+  "@dashboardWorkerSearchPlaceholder": {
+    "description": "Search input placeholder for worker"
+  },
+  "dashboardEmployerBannerTitle": "100% Aadhaar Verified Daily Pros",
+  "@dashboardEmployerBannerTitle": {
+    "description": "Value proposition banner title for employer"
+  },
+  "dashboardWorkerBannerTitle": "Guaranteed Same-Day UPI Payout",
+  "@dashboardWorkerBannerTitle": {
+    "description": "Value proposition banner title for worker"
+  },
+  "dashboardEmployerBannerSubhead": "Book verified daily workers with instant response",
+  "@dashboardEmployerBannerSubhead": {
+    "description": "Value proposition banner subhead for employer"
+  },
+  "dashboardWorkerBannerSubhead": "Direct connection with verified local households",
+  "@dashboardWorkerBannerSubhead": {
+    "description": "Value proposition banner subhead for worker"
+  },
+  "postNewJobByCategory": "POST A NEW JOB BY CATEGORY",
+  "@postNewJobByCategory": {
+    "description": "Category section title for employer"
+  },
+  "availableWorkCategories": "AVAILABLE WORK CATEGORIES",
+  "@availableWorkCategories": {
+    "description": "Category section title for worker"
+  },
+  "postJobCta": "+ Post Job",
+  "@postJobCta": {
+    "description": "Post job button text"
+  },
+  "categoriesCount": "6 Categories",
+  "@categoriesCount": {
+    "description": "Category count label"
+  },
+  "categoryPainting": "Painting",
+  "@categoryPainting": {
+    "description": "Painting category name"
+  },
+  "categoryCleaning": "Cleaning",
+  "@categoryCleaning": {
+    "description": "Cleaning category name"
+  },
+  "categoryPlumbing": "Plumbing",
+  "@categoryPlumbing": {
+    "description": "Plumbing category name"
+  },
+  "categoryCooking": "Cooking",
+  "@categoryCooking": {
+    "description": "Cooking category name"
+  },
+  "categoryGardening": "Gardening",
+  "@categoryGardening": {
+    "description": "Gardening category name"
+  },
+  "categoryElectrical": "Electrical",
+  "@categoryElectrical": {
+    "description": "Electrical category name"
+  },
+  "categoryCarpentry": "Carpentry",
+  "@categoryCarpentry": {
+    "description": "Carpentry category name"
+  },
+  "categoryAll": "All",
+  "@categoryAll": {
+    "description": "All categories label"
+  },
+  "badgeHighDemand": "HIGH DEMAND",
+  "@badgeHighDemand": {
+    "description": "High demand badge text"
+  },
+  "badgePopular": "POPULAR",
+  "@badgePopular": {
+    "description": "Popular badge text"
+  },
+  "badgeUrgent": "URGENT",
+  "@badgeUrgent": {
+    "description": "Urgent badge text"
+  },
+  "badgeVerified": "VERIFIED",
+  "@badgeVerified": {
+    "description": "Verified badge text"
+  },
+  "badgePro": "PRO",
+  "@badgePro": {
+    "description": "Pro badge text"
+  },
+  "roleEmployer": "EMPLOYER",
+  "@roleEmployer": {
+    "description": "Employer role label"
+  },
+  "roleWorker": "WORKER",
+  "@roleWorker": {
+    "description": "Worker role label"
+  },
+  "roleEmployerSubtitle": "Hire local daily-wage workers for tasks",
+  "@roleEmployerSubtitle": {
+    "description": "Role selection subtitle for employer"
+  },
+  "roleWorkerSubtitle": "Find local daily jobs and earn same-day",
+  "@roleWorkerSubtitle": {
+    "description": "Role selection subtitle for worker"
+  },
+  "authSignIn": "Sign In",
+  "@authSignIn": {
+    "description": "Sign in button label"
+  },
+  "authSignUp": "Sign Up",
+  "@authSignUp": {
+    "description": "Sign up button label"
+  },
+  "authWelcomeBack": "Welcome Back",
+  "@authWelcomeBack": {
+    "description": "Welcome back message"
+  },
+  "authCreateAccount": "Create Account",
+  "@authCreateAccount": {
+    "description": "Create account message"
+  },
+  "authEmailAuth": "EMAIL AUTH",
+  "@authEmailAuth": {
+    "description": "Email auth tab label"
+  },
+  "authMobileOtp": "MOBILE OTP",
+  "@authMobileOtp": {
+    "description": "Mobile OTP tab label"
+  },
+  "authEmail": "EMAIL ADDRESS",
+  "@authEmail": {
+    "description": "Email address input label"
+  },
+  "authPassword": "PASSWORD",
+  "@authPassword": {
+    "description": "Password input label"
+  },
+  "authPhoneNumber": "MOBILE NUMBER",
+  "@authPhoneNumber": {
+    "description": "Phone number input label"
+  },
+  "authFullName": "FULL NAME",
+  "@authFullName": {
+    "description": "Full name input label"
+  },
+  "authStreetAddress": "STREET ADDRESS",
+  "@authStreetAddress": {
+    "description": "Street address label"
+  },
+  "authLocality": "LOCALITY / AREA",
+  "@authLocality": {
+    "description": "Locality label"
+  },
+  "authCity": "CITY",
+  "@authCity": {
+    "description": "City label"
+  },
+  "authSelectRole": "SELECT YOUR ROLE",
+  "@authSelectRole": {
+    "description": "Select role label"
+  },
+  "authAlreadyHaveAccount": "Already have an account? Sign In",
+  "@authAlreadyHaveAccount": {
+    "description": "Already have an account switch prompt"
+  },
+  "authDontHaveAccount": "Don't have an account? Sign Up",
+  "@authDontHaveAccount": {
+    "description": "Don't have an account switch prompt"
+  },
+  "authSendOtpCta": "SEND OTP & VERIFY",
+  "@authSendOtpCta": {
+    "description": "Send OTP CTA button text"
+  },
+  "authCreateAccountCta": "CREATE ACCOUNT & PROCEED",
+  "@authCreateAccountCta": {
+    "description": "Create account CTA button text"
+  },
+  "authSignInCta": "SIGN IN TO KAAMSETU",
+  "@authSignInCta": {
+    "description": "Sign in CTA button text"
+  },
+  "authHeadingSignIn": "SIGN IN TO KAAMSETU",
+  "@authHeadingSignIn": {
+    "description": "Sign in screen title"
+  },
+  "authHeadingSignUp": "CREATE AN ACCOUNT",
+  "@authHeadingSignUp": {
+    "description": "Sign up screen title"
+  },
+  "jobListingsTitle": "All Job Listings",
+  "@jobListingsTitle": {
+    "description": "Job listings screen title"
+  },
+  "jobListingsCategoryTitle": "{category} Jobs",
+  "@jobListingsCategoryTitle": {
+    "description": "Category specific job listings title",
+    "placeholders": {
+      "category": {
+        "type": "String"
+      }
+    }
+  },
+  "searchPlaceholderListings": "Search title, category, location...",
+  "@searchPlaceholderListings": {
+    "description": "Job listings search placeholder"
+  },
+  "filterButton": "Filter",
+  "@filterButton": {
+    "description": "Filter button label"
+  },
+  "statusAll": "ALL",
+  "@statusAll": {
+    "description": "All status tab label"
+  },
+  "statusOpen": "OPEN",
+  "@statusOpen": {
+    "description": "Open status tab label"
+  },
+  "statusAssigned": "ASSIGNED",
+  "@statusAssigned": {
+    "description": "Assigned status tab label"
+  },
+  "statusCompleted": "DONE",
+  "@statusCompleted": {
+    "description": "Completed status tab label"
+  },
+  "statusCompletedFull": "COMPLETED",
+  "@statusCompletedFull": {
+    "description": "Completed full word label"
+  },
+  "perDay": "per day",
+  "@perDay": {
+    "description": "Per day wage label"
+  },
+  "applicantsCount": "{count} applicants",
+  "@applicantsCount": {
+    "description": "Applicants count label",
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "noListingsFound": "No listings found matching filters.",
+  "@noListingsFound": {
+    "description": "Empty state text for listings"
+  },
+  "resetFilters": "Reset Filters",
+  "@resetFilters": {
+    "description": "Reset filters button text"
+  },
+  "applyNow": "Apply Now",
+  "@applyNow": {
+    "description": "Apply now button text"
+  },
+  "splashModeEmployer": "I NEED WORKERS",
+  "@splashModeEmployer": {
+    "description": "Splash screen employer guest mode toggle button text"
+  },
+  "splashModeWorker": "I'M LOOKING FOR WORK",
+  "@splashModeWorker": {
+    "description": "Splash screen worker guest mode toggle button text"
+  },
+  "splashWorkerHeadline": "Browse Open Daily Dispatches Nearby",
+  "@splashWorkerHeadline": {
+    "description": "Splash screen worker mode hero headline"
+  },
+  "splashSignInToBrowse": "Sign In to Browse ->",
+  "@splashSignInToBrowse": {
+    "description": "Splash screen sign in to browse link text"
+  },
+  "statVerifiedPros": "Verified Pros",
+  "@statVerifiedPros": {
+    "description": "Stats bar verified pros label"
+  },
+  "statAvgDailyRate": "Avg Daily Rate",
+  "@statAvgDailyRate": {
+    "description": "Stats bar average daily rate label"
+  },
+  "statJobDispatch": "Job Dispatch",
+  "@statJobDispatch": {
+    "description": "Stats bar job dispatch speed label"
+  },
+  "splashFooterSecurity": "RLS ENFORCED • AADHAAR VERIFIED WORKFORCE",
+  "@splashFooterSecurity": {
+    "description": "Splash screen security footer text"
+  },
+  "jobDetailTitle": "Job Dispatch Detail",
+  "@jobDetailTitle": {
+    "description": "Job detail screen appbar title"
+  },
+  "jobOverviewSection": "JOB OVERVIEW",
+  "@jobOverviewSection": {
+    "description": "Job overview section title"
+  },
+  "jobLocationSection": "JOB LOCATION",
+  "@jobLocationSection": {
+    "description": "Job location section title"
+  },
+  "employerVerificationSection": "EMPLOYER VERIFICATION",
+  "@employerVerificationSection": {
+    "description": "Employer verification section title"
+  },
+  "applicantsAssignmentSection": "APPLICANTS & ASSIGNMENT",
+  "@applicantsAssignmentSection": {
+    "description": "Applicants and assignment section title"
+  },
+  "stepPosted": "Posted",
+  "@stepPosted": {
+    "description": "Step tracker posted status"
+  },
+  "stepAssigned": "Assigned",
+  "@stepAssigned": {
+    "description": "Step tracker assigned status"
+  },
+  "stepCompleted": "Completed",
+  "@stepCompleted": {
+    "description": "Step tracker completed status"
+  },
+  "dailyWageLabel": "Daily Wage",
+  "@dailyWageLabel": {
+    "description": "Daily wage label"
+  },
+  "postedDateLabel": "Posted Date",
+  "@postedDateLabel": {
+    "description": "Posted date label"
+  },
+  "categoryLabel": "Category",
+  "@categoryLabel": {
+    "description": "Category label"
+  },
+  "urgencyLevelLabel": "Urgency Level",
+  "@urgencyLevelLabel": {
+    "description": "Urgency level label"
+  },
+  "aadhaarVerifiedEmployer": "Aadhaar Verified Employer",
+  "@aadhaarVerifiedEmployer": {
+    "description": "Aadhaar verified employer badge text"
+  },
+  "applyForJobCta": "Apply for this Job",
+  "@applyForJobCta": {
+    "description": "Apply for job CTA text"
+  },
+  "alreadyApplied": "Already Applied",
+  "@alreadyApplied": {
+    "description": "Already applied status text"
+  },
+  "assignWorkerCta": "Assign Worker",
+  "@assignWorkerCta": {
+    "description": "Assign worker CTA button text"
+  },
+  "markCompletedCta": "Mark Job Completed",
+  "@markCompletedCta": {
+    "description": "Mark job completed CTA button text"
+  },
+  "rateWorkerCta": "Rate Worker",
+  "@rateWorkerCta": {
+    "description": "Rate worker CTA button text"
+  },
+  "jobAssignedTo": "Assigned to {name}",
+  "@jobAssignedTo": {
+    "description": "Job assigned to worker text",
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
+  "profileTitle": "System Profile & Settings",
+  "@profileTitle": {
+    "description": "Profile page title"
+  },
+  "verifiedUser": "Verified User",
+  "@verifiedUser": {
+    "description": "Verified user status"
+  },
+  "verifiedEmployerBadge": "Verified Employer",
+  "@verifiedEmployerBadge": {
+    "description": "Verified employer badge"
+  },
+  "verifiedWorkerBadge": "Verified Worker",
+  "@verifiedWorkerBadge": {
+    "description": "Verified worker badge"
+  },
+  "trustAadhaar": "Aadhaar Verified",
+  "@trustAadhaar": {
+    "description": "Trust badge Aadhaar"
+  },
+  "trustBackground": "Background Checked",
+  "@trustBackground": {
+    "description": "Trust badge background checked"
+  },
+  "trustSkill": "Skill Certified",
+  "@trustSkill": {
+    "description": "Trust badge skill certified"
+  },
+  "languageSettingTitle": "App Language / भाषा",
+  "@languageSettingTitle": {
+    "description": "Language selection setting label"
+  },
+  "english": "English",
+  "@english": {
+    "description": "English language label"
+  },
+  "hindi": "हिंदी",
+  "@hindi": {
+    "description": "Hindi language label"
+  },
+  "activeSkillsTitle": "Active Skills & Certifications",
+  "@activeSkillsTitle": {
+    "description": "Active skills section title"
+  },
+  "portfolioGalleryTitle": "Work Samples & Portfolio Gallery",
+  "@portfolioGalleryTitle": {
+    "description": "Portfolio gallery section title"
+  },
+  "portfolioInstruction": "Tap any photo to view full resolution or update showcase",
+  "@portfolioInstruction": {
+    "description": "Portfolio instruction text"
+  },
+  "addWorkPhoto": "+ Add Work Photo",
+  "@addWorkPhoto": {
+    "description": "Add work photo CTA button text"
+  },
+  "reviewsSectionTitle": "Employer Reviews & Ratings",
+  "@reviewsSectionTitle": {
+    "description": "Reviews section title"
+  },
+  "noReviewsYet": "No reviews yet",
+  "@noReviewsYet": {
+    "description": "No reviews empty state title"
+  },
+  "noReviewsSubtext": "Complete jobs to receive ratings and reviews from employers.",
+  "@noReviewsSubtext": {
+    "description": "No reviews empty state subtext"
+  },
+  "ratingBreakdownSubtext": "Rating breakdown based on verified completed jobs",
+  "@ratingBreakdownSubtext": {
+    "description": "Rating breakdown subtext"
+  },
+  "primaryAddressTitle": "Primary Address & Location",
+  "@primaryAddressTitle": {
+    "description": "Primary address section title"
+  },
+  "editAddress": "Edit Address",
+  "@editAddress": {
+    "description": "Edit address button text"
+  },
+  "signOut": "Sign Out",
+  "@signOut": {
+    "description": "Sign out button label"
+  },
+  "notificationsTitle": "Notifications",
+  "@notificationsTitle": {
+    "description": "Notifications title"
+  },
+  "markAllAsRead": "Mark all as read",
+  "@markAllAsRead": {
+    "description": "Mark all as read action text"
+  },
+  "noNotifications": "No notifications yet",
+  "@noNotifications": {
+    "description": "No notifications title"
+  },
+  "noNotificationsSubtext": "System alerts and dispatch updates will appear here.",
+  "@noNotificationsSubtext": {
+    "description": "No notifications subtext"
+  },
+  "recentSearches": "RECENT SEARCHES",
+  "@recentSearches": {
+    "description": "Recent searches title"
+  },
+  "clearAll": "Clear All",
+  "@clearAll": {
+    "description": "Clear all button text"
+  },
+  "searchResults": "Search Results",
+  "@searchResults": {
+    "description": "Search results section title"
+  },
+  "noSearchResults": "No jobs match your query",
+  "@noSearchResults": {
+    "description": "No search results text"
+  },
+  "postJobSheetTitle": "Post a New Job",
+  "@postJobSheetTitle": {
+    "description": "Post job bottom sheet title"
+  },
+  "workCategoryLabel": "WORK CATEGORY *",
+  "@workCategoryLabel": {
+    "description": "Work category input label"
+  },
+  "jobTitleLabel": "JOB TITLE *",
+  "@jobTitleLabel": {
+    "description": "Job title input label"
+  },
+  "descriptionLabel": "DESCRIPTION *",
+  "@descriptionLabel": {
+    "description": "Description input label"
+  },
+  "dailyWageInputLabel": "DAILY WAGE (₹) *",
+  "@dailyWageInputLabel": {
+    "description": "Daily wage input label"
+  },
+  "photoAttachmentLabel": "PHOTO ATTACHMENT",
+  "@photoAttachmentLabel": {
+    "description": "Photo attachment label"
+  },
+  "selectPhotoCta": "Select Photo",
+  "@selectPhotoCta": {
+    "description": "Select photo button text"
+  },
+  "postJobNowCta": "POST JOB NOW",
+  "@postJobNowCta": {
+    "description": "Post job submit button text"
+  },
+  "filterSheetTitle": "Filter & Sort Jobs",
+  "@filterSheetTitle": {
+    "description": "Filter sheet title"
+  },
+  "priceRangeLabel": "PRICE RANGE (DAILY WAGE)",
+  "@priceRangeLabel": {
+    "description": "Price range filter label"
+  },
+  "sortByLabel": "SORT BY",
+  "@sortByLabel": {
+    "description": "Sort by filter label"
+  },
+  "categoriesLabel": "CATEGORIES",
+  "@categoriesLabel": {
+    "description": "Categories filter label"
+  },
+  "sortMostRecent": "Most Recent",
+  "@sortMostRecent": {
+    "description": "Sort option most recent"
+  },
+  "sortPriceLow": "Price: Low to High",
+  "@sortPriceLow": {
+    "description": "Sort option price low to high"
+  },
+  "sortPriceHigh": "Price: High to Low",
+  "@sortPriceHigh": {
+    "description": "Sort option price high to low"
+  },
+  "sortRating": "Rating",
+  "@sortRating": {
+    "description": "Sort option rating"
+  },
+  "sortUrgency": "Urgency",
+  "@sortUrgency": {
+    "description": "Sort option urgency"
+  },
+  "applyFiltersCta": "APPLY FILTERS",
+  "@applyFiltersCta": {
+    "description": "Apply filters button text"
+  },
+  "rateWorkerSheetTitle": "Rate Worker & Complete Job",
+  "@rateWorkerSheetTitle": {
+    "description": "Rate worker sheet title"
+  },
+  "rateWorkerSubtitle": "How was the work quality performed by worker?",
+  "@rateWorkerSubtitle": {
+    "description": "Rate worker sheet subtitle"
+  },
+  "selectRatingLabel": "Select Rating (1 to 5 Stars)",
+  "@selectRatingLabel": {
+    "description": "Select rating label"
+  },
+  "feedbackLabel": "FEEDBACK / COMMENTS (OPTIONAL)",
+  "@feedbackLabel": {
+    "description": "Feedback label"
+  },
+  "submitReviewCta": "SUBMIT REVIEW & CLOSE JOB",
+  "@submitReviewCta": {
+    "description": "Submit review CTA text"
+  },
+  "updateAddressSheetTitle": "Update Primary Address",
+  "@updateAddressSheetTitle": {
+    "description": "Update address sheet title"
+  },
+  "saveAddressCta": "SAVE ADDRESS",
+  "@saveAddressCta": {
+    "description": "Save address CTA button text"
+  },
+  "profileSystemReconfiguration": "SYSTEM RECONFIGURATION",
+  "profileViewSystemGallery": "View System Gallery & Widgets",
+  "profileTogglePalette": "Toggle Dark/Warm Palette Tokens",
+  "profileClearCache": "Clear Cached Dispatch Data",
+  "profileAccountCompliance": "ACCOUNT & COMPLIANCE",
+  "profileAadhaarDoc": "Aadhaar Document (Verified)",
+  "profileBankAccount": "Bank Account for Instant UPI Payout",
+  "profileSignOut": "Sign Out of Session",
+  "profileDispatchSpecs": "WORKFORCE DISPATCH SPECS",
+  "profileExpectedDailyRate": "Expected Daily Rate",
+  "profileDispatchRadius": "Dispatch Radius",
+  "profilePreferredShift": "Preferred Shift",
+  "profilePaymentMode": "Payment Mode",
+  "profileEditSkills": "Edit Skills ->",
+  "profileAddSample": "+ Add Sample",
+  "statActivePostings": "Active Postings",
+  "statActivePostingsSubtext": "1 Painting, 1 Plumbing",
+  "statApplications": "Applications",
+  "statApplicationsSubtext": "4 Verified Workers",
+  "statTotalDispatches": "Total Dispatches",
+  "statTotalDispatchesSubtext": "Completed Jobs",
+  "statAvgDailyPayout": "Avg Daily Payout",
+  "statAvgDailyPayoutSubtext": "Per Worker",
+  "statDailyWageRate": "Daily Wage Rate",
+  "statSetByEmployer": "Set by Employer",
+  "statRatingScore": "Rating Score",
+  "stat24Reviews": "24 Reviews",
+  "statJobsCompleted": "Jobs Completed",
+  "statOnTime": "100% On-Time",
+  "statApplicationsSent": "Applications Sent",
+  "statPendingReview": "Pending Review",
+  "headerRecentDispatchLedger": "RECENT DISPATCH LEDGER",
+  "headerRecommendedJobsNearby": "RECOMMENDED JOBS NEARBY",
+  "linkViewAll": "View All ->",
+  "headerDispatchMetricsOverview": "DISPATCH & METRICS OVERVIEW",
+  "headerMyWorkParameters": "MY WORK PARAMETERS",
+  "headerActiveDispatchOps": "Active Dispatch Operations",
+  "headerDailyAvailStatus": "Daily Availability Status",
+  "subtextActiveDispatchOps": "Open postings receiving applicant bids. Next dispatch scheduled for 09:00 AM tomorrow.",
+  "subtextDailyAvailStatus": "Your profile is active in local dispatch pool. Employers nearby can view your skill certifications and call directly.",
+  "statusPostingsActive": "POSTINGS ACTIVE",
+  "statusAvailable": "AVAILABLE",
+  "jobDetailTaskRequirements": "TASK & SITE REQUIREMENTS",
+  "jobDetailEmployerHeader": "EMPLOYER & DISPATCH OWNER",
+  "jobDetailApplicantBids": "APPLICANT BIDS & DISPATCH REGISTRY",
+  "jobDetailNoApps": "No applications submitted yet. Workers nearby can express interest directly.",
+  "jobDetailAcceptCta": "Accept"
+}
