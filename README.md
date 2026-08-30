@@ -84,7 +84,7 @@ think of it as renting computers and utilities instead of buying your own.
 ## Project structure
 
 ```
-llm-assisted-cloud-incident-response-aws/
+LLM-Assisted-Cloud-Incident-Response-AWS-SBG/
 ├── infra/
 │   ├── template.yaml              # SAM template: every AWS resource defined here
 │   └── demo-app/                  # the toy app we break on purpose (services A/B/C)
@@ -152,7 +152,7 @@ You'll need a Mac/Linux machine and an AWS account with credentials.
 1. **Clone the repo**
    ```bash
    git clone <repo-url>
-   cd llm-cloud-assisted-response-aws
+   cd LLM-Assisted-Cloud-Incident-Response-AWS-SBG
    ```
 
 2. **Install the tools**
