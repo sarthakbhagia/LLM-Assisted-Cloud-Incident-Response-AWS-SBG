@@ -84,7 +84,7 @@ think of it as renting computers and utilities instead of buying your own.
 ## Project structure
 
 ```
-llm-cloud-assisted-response-aws/
+llm-assisted-cloud-incident-response-aws/
 ├── infra/
 │   ├── template.yaml              # SAM template: every AWS resource defined here
 │   └── demo-app/                  # the toy app we break on purpose (services A/B/C)
