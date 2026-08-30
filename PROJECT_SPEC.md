@@ -8,6 +8,15 @@ Build an AI agent system that automatically detects, diagnoses, and (with human 
 
 This is a research/academic project (IEEE paper + presentation), so the implementation must also produce **structured, loggable output** at every stage for later evaluation (accuracy, hallucination rate, MTTR).
 
+## Research Novelty (this is the paper's actual contribution — don't treat it as an afterthought)
+
+Building a detect→diagnose→remediate agent is not novel by itself; several published systems already do this. This project's contribution is:
+
+1. **Closed-loop remediation verification** — after a remediation action executes, the system automatically re-checks the same signal that triggered detection (metric, Config rule, trace) to confirm the incident actually resolved, rather than assuming a "successful" API call means the problem is fixed. This measures the gap between "the LLM correctly diagnosed the issue" and "the fix actually worked" — most existing systems stop at diagnosis and never verify.
+2. **AWS-specific reasoning failure taxonomy** — every diagnosis is logged with enough structure to manually (or semi-automatically) categorize *how* the LLM's reasoning went wrong when it did (e.g., confused a metric name with a resource ARN, hallucinated an IAM permission not present in the fetched policy, mistook correlation in an X-Ray trace for causation). This produces a small taxonomy specific to AWS observability data, which does not yet exist in published work.
+
+Both of these require no new AWS services beyond what's already in this spec — they are additional logging/verification steps layered onto the same pipeline. Do not skip these when implementing Phase 6 and Phase 7 — they are the difference between "a working demo" and "a publishable contribution."
+
 ---
 
 ## Scope: 3 Fault Classes
@@ -23,8 +32,8 @@ Build the full pipeline for all three of these. Do not expand scope beyond these
 ## Tech Stack
 
 - **Cloud**: AWS (assume account + credits already available)
-- **LLM**: Amazon Bedrock (Claude model) — use `bedrock-runtime InvokeModel` via boto3
-- **RAG**: Amazon Bedrock Knowledge Bases (backed by OpenSearch Serverless, auto-provisioned)
+- **LLM**: Amazon Bedrock (Claude Sonnet, via Global cross-Region inference profile — e.g. `global.anthropic.claude-sonnet-4-6` — for ap-south-1) — use `bedrock-runtime InvokeModel` via boto3
+- **RAG**: Direct context injection, NOT Bedrock Knowledge Bases / OpenSearch Serverless. The runbook corpus is only 3 short markdown files (under 1 page each) — there is no need for a vector store. Load all 3 runbook files directly and inject the relevant one(s) into the prompt as plain text context, selected by `fault_class`. This avoids OpenSearch Serverless entirely, which has a real, documented cost floor of ~$175-700/month even when idle — pure waste for a corpus this small. Document this as a deliberate methodology choice in the paper (see "RAG vs. no-RAG" evaluation in Phase 7), not a shortcut.
 - **Compute**: AWS Lambda (Python 3.12 runtime) for all backend logic
 - **Detection**: CloudWatch Alarms, EventBridge Rules, AWS Config, Amazon GuardDuty
 - **Tracing**: AWS X-Ray (for the cascade fault class)
@@ -63,6 +72,7 @@ Build the full pipeline for all three of these. Do not expand scope beyond these
   runbook_resource_exhaustion.md
   runbook_misconfiguration.md
   runbook_service_cascade.md
+  runbook_loader.py           # loads the correct runbook(s) as plain text for prompt injection (no vector store)
 /fault_injection
   inject_resource_exhaustion.py
   inject_misconfiguration.py
@@ -94,12 +104,19 @@ README.md
     "affected_resources": ["string"],
     "suggested_action": "string (maps to a remediation action key)",
     "reasoning_trace": "string — the LLM's full reasoning, for hallucination auditing",
-    "used_rag": "boolean"
+    "used_rag": "boolean — false when running the no-context-injection ablation for comparison",
+    "failure_mode": "string | null — populated during manual/semi-automated evaluation review; e.g. 'metric_arn_confusion', 'hallucinated_permission', 'correlation_as_causation', 'none' if diagnosis was clean"
   },
   "remediation": {
     "status": "pending_approval | approved | executed | rejected | failed",
     "action_taken": "string",
     "executed_at": "ISO8601 timestamp | null"
+  },
+  "verification": {
+    "status": "not_run | resolved | not_resolved | inconclusive",
+    "checked_at": "ISO8601 timestamp | null",
+    "signal_rechecked": "string — which metric/Config rule/trace was re-queried post-remediation",
+    "notes": "string — brief explanation of what the recheck found"
   },
   "ground_truth": {
     "true_fault_class": "string — only populated during fault-injection evaluation runs",
@@ -152,16 +169,17 @@ README.md
     - Writes initial `IncidentRecord` to DynamoDB with status `detected`
     - Invokes `diagnosis_lambda` (async invoke or via EventBridge)
 
-### Phase 4: Knowledge base + diagnosis
-13. Write the 3 runbook markdown files (keep each under 1 page — plain, procedural, how a human would diagnose/fix each fault type)
-14. Upload runbooks to S3, create a Bedrock Knowledge Base pointed at that S3 prefix, sync it
-15. Implement `prompts.py` — one prompt template per fault_class, each instructing the model to: read the incident data, use retrieved runbook context, and return ONLY the JSON contract above, nothing else
+### Phase 4: Runbook context + diagnosis
+13. Write the 3 runbook markdown files (keep each under 1 page — plain, procedural, how a human would diagnose/fix each fault type). Store them in `/knowledge_base/` and also copy to S3 for reference/audit purposes.
+14. Implement `runbook_loader.py`: a simple function that takes `fault_class` and returns the matching runbook's full text (plain file read, no embeddings, no vector search — the corpus is 3 files, this is a lookup, not retrieval)
+15. Implement `prompts.py` — one prompt template per fault_class, each instructing the model to: read the incident data, use the injected runbook text as context, and return ONLY the JSON contract above, nothing else
 16. Implement `diagnosis_lambda.py`:
     - Reads raw_data.json from S3
-    - Retrieves relevant runbook chunks from the Knowledge Base (Bedrock `Retrieve` API)
-    - Constructs the prompt (data + retrieved context)
-    - Calls `bedrock-runtime InvokeModel`
+    - Loads the matching runbook text via `runbook_loader.py` (unless `used_rag=false` is set for the ablation run, in which case skip this step entirely and rely on the model's own knowledge)
+    - Constructs the prompt (incident data + runbook text as context)
+    - Calls `bedrock-runtime InvokeModel` with the Claude Sonnet inference profile
     - Parses and validates the JSON response against the contract; retry once with an error-correction prompt if invalid
+    - Sets `diagnosis.used_rag` based on whether runbook context was included
     - Updates the `IncidentRecord` in DynamoDB with the diagnosis
     - Invokes `notify_lambda`
 
@@ -179,15 +197,25 @@ README.md
     - `manual_review_required`: no-op, just flags for a human
 20. Implement `remediation_lambda.py`: reads the approved incident, calls the matching action function, updates DynamoDB status to `executed` or `failed`
 
+### Phase 6.5: Closed-loop verification (core novelty — do not skip)
+21. Implement a `verification_lambda.py` (or a final step inside `remediation_lambda.py` if simpler): after a remediation action executes, wait a short fixed interval (e.g., 2-5 minutes, long enough for the fix to take effect), then re-query the *same signal* that originally triggered detection for this incident:
+    - Resource exhaustion → re-check the CloudWatch metric that crossed the alarm threshold
+    - Misconfiguration → re-check the Config rule compliance status or re-run the GuardDuty-equivalent check on the resource
+    - Service cascade → re-check the X-Ray trace / error rate on the affected services
+22. Compare the rechecked signal against the original alarm threshold/condition. Write the result to `IncidentRecord.verification`: `resolved` (signal back to normal), `not_resolved` (signal still triggering), or `inconclusive` (ambiguous/insufficient data)
+23. This step runs for both real and injected incidents — it's what lets you measure the diagnosis-recovery gap (cases where `diagnosis.confidence` was high but `verification.status` came back `not_resolved`)
+
 ### Phase 7: Fault injection + evaluation harness
-21. Implement the 3 injection scripts — each deliberately triggers its fault class against the demo app (e.g., a CPU-burn script for exhaustion, a script that flips an S3 bucket to public, a script that kills service-c to cascade failures into service-a/b)
-22. Implement `run_evaluation.py`: runs each injection script N times (aim for 15-20 runs per class), waits for the pipeline to complete, pulls the resulting `IncidentRecord` from DynamoDB, and logs ground truth vs actual diagnosis
-23. Implement `metrics.py`:
+24. Implement the 3 injection scripts — each deliberately triggers its fault class against the demo app (e.g., a CPU-burn script for exhaustion, a script that flips an S3 bucket to public, a script that kills service-c to cascade failures into service-a/b)
+25. Implement `run_evaluation.py`: runs each injection script N times (aim for 15-20 runs per class), waits for the pipeline (including the Phase 6.5 verification step) to complete, pulls the resulting `IncidentRecord` from DynamoDB, and logs ground truth vs actual diagnosis vs verification outcome
+26. Implement `metrics.py`:
     - **MTTR**: `remediation.executed_at - detected_at`
-    - **RCA accuracy**: does `diagnosis.root_cause` semantically match `ground_truth.true_fault_class`? (use simple keyword/LLM-judge scoring, document your method in the paper)
-    - **Hallucination rate**: does `reasoning_trace` reference any resource/metric not present in `raw_data.json`? (can script a basic check, or manually audit a sample — document either way)
-    - Add a flag to rerun a subset of evaluation with `used_rag=false` (bypass Knowledge Base retrieval) to compare RAG vs no-RAG accuracy/hallucination
-24. Output all results to `/evaluation/results/` as CSV + summary JSON, ready to turn into paper graphs
+    - **RCA accuracy**: does `diagnosis.root_cause` semantically match `ground_truth.true_fault_class`? (use simple keyword/rule-based scoring as the primary metric to avoid LLM-judging-LLM bias; optionally compute a secondary LLM-judge score for comparison and document both methods clearly)
+    - **Hallucination rate**: does `reasoning_trace` reference any resource/metric not present in `raw_data.json`? (script a basic check, or manually audit a sample — document either way)
+    - **Diagnosis-recovery gap** (novelty metric): % of incidents where `diagnosis.confidence` was high (e.g. >0.7) but `verification.status == not_resolved` — this is your headline result for the "diagnosis isn't the same as recovery" contribution
+    - **Failure mode distribution** (novelty metric): tally of `diagnosis.failure_mode` values across all runs — produces the taxonomy breakdown table for the paper (this requires a manual or semi-automated review pass over `reasoning_trace` for incidents where diagnosis was wrong or `verification.status == not_resolved`; define 4-6 failure mode categories after reviewing your first ~20 traces, don't predefine them before seeing real data)
+    - Add a flag to rerun a subset of evaluation with `used_rag=false` (skip runbook context injection) to compare context-injection vs no-context accuracy/hallucination/verification outcomes
+27. Output all results to `/evaluation/results/` as CSV + summary JSON, ready to turn into paper graphs (include a dedicated `failure_taxonomy.csv` and `diagnosis_recovery_gap.csv`)
 
 ---
 
@@ -198,6 +226,8 @@ README.md
 - LLM output must be JSON-schema validated before being used anywhere downstream — never execute an action based on unparsed/free-text LLM output
 - Every incident, whether real or injected, gets logged to DynamoDB — this is your evaluation dataset, don't skip logging even during manual testing
 - Keep prompts and runbooks in version control as plain files (`prompts.py`, `/knowledge_base/*.md`) so changes are diffable for the paper's methodology section
+- Do NOT skip the Phase 6.5 verification step or the failure-mode logging to save time — these are the paper's actual novel contribution, not optional polish. A working demo without these is a class project; with these, it's a publishable result.
+- Do NOT provision Bedrock Knowledge Bases / OpenSearch Serverless anywhere in this project, including via the console's "quick create" option — it auto-provisions an OpenSearch Serverless collection with a real cost floor even when idle, and deleting the Knowledge Base does not delete the underlying collection
 
 ---
 
@@ -208,9 +238,10 @@ If feeding this to an AI IDE one phase at a time, do it in this order and confir
 1. Phase 0 (infra skeleton) → confirm `sam deploy` succeeds
 2. Phase 1 (demo app) → confirm services communicate
 3. Phase 2 + 3 (detection + collection) → manually trigger a fault, confirm data lands in S3/DynamoDB
-4. Phase 4 (diagnosis) → confirm a valid JSON diagnosis is produced for a real triggered fault
+4. Phase 4 (diagnosis) → confirm a valid JSON diagnosis is produced for a real triggered fault, using injected runbook context (no Knowledge Base/OpenSearch)
 5. Phase 5 (reporting/approval) → confirm Slack message + approval flow works
 6. Phase 6 (remediation) → confirm an approved incident actually executes the fix
-7. Phase 7 (evaluation) → run the full harness, generate results for the paper
+7. Phase 6.5 (verification) → confirm the system re-checks the original signal post-remediation and correctly logs resolved/not_resolved
+8. Phase 7 (evaluation) → run the full harness including the RAG-ablation and failure-mode review pass, generate results for the paper
 
 Each phase should be a separate PR/commit so the team's workstreams can build in parallel once Phase 0-3 are stable and merged.
