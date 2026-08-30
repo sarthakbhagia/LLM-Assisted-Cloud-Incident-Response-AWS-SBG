@@ -1,0 +1,10 @@
+version = 0.1
+[default.deploy.parameters]
+stack_name = "llm-incident-response"
+s3_bucket = "aws-sam-cli-managed-default-samclisourcebucket-1k83c83t0aik8"
+s3_prefix = "llm-incident-response"
+region = "ap-south-1"
+confirm_changeset = false
+capabilities = "CAPABILITY_IAM CAPABILITY_NAMED_IAM"
+disable_rollback = true
+image_repositories = []

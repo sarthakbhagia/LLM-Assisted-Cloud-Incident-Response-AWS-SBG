@@ -1,0 +1,229 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  LLM-Assisted Cloud Incident Response - serverless pipeline.
+  Phase 0: infra skeleton (data lake, incident table, IAM roles).
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Timeout: 60
+    MemorySize: 256
+    Architectures: [arm64]
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+    Description: Deployment environment, used to suffix resource names.
+
+Resources:
+
+  # ---------------------------------------------------------------------------
+  # Incident data lake (raw observability bundles + runbook docs)
+  # ---------------------------------------------------------------------------
+  IncidentDataLake:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "llm-incident-datalake-${AWS::AccountId}-${Environment}"
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  # ---------------------------------------------------------------------------
+  # Structured incident records
+  # ---------------------------------------------------------------------------
+  IncidentsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "incidents-${Environment}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: incident_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: incident_id
+          KeyType: HASH
+      StreamSpecification:
+        StreamViewType: NEW_IMAGE
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  # ---------------------------------------------------------------------------
+  # IAM role: collector + diagnosis Lambdas.
+  # Read-only observability access + Bedrock invoke + S3/DynamoDB write.
+  # ---------------------------------------------------------------------------
+  CollectorDiagnosisRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "incident-collector-diagnosis-role-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: observability-read
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:DescribeLogGroups
+                  - logs:GetLogEvents
+                  - logs:FilterLogEvents
+                  - logs:StartQuery
+                  - logs:GetQueryResults
+                  - logs:DescribeLogStreams
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - cloudwatch:GetMetricData
+                  - cloudwatch:GetMetricStatistics
+                  - cloudwatch:ListMetrics
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - xray:GetTraceSummaries
+                  - xray:BatchGetTraces
+                  - xray:GetServiceGraph
+                  - xray:GetTraceGraph
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - config:GetComplianceDetailsByConfigRule
+                  - config:GetResourceConfigHistory
+                  - config:DescribeComplianceByConfigRule
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - guardduty:GetFindings
+                  - guardduty:ListFindings
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - ecs:DescribeServices
+                  - ecs:DescribeTasks
+                  - ecs:ListServices
+                  - ecs:ListTasks
+                Resource: '*'
+        - PolicyName: datalake-write
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                Resource: !Sub "${IncidentDataLake.Arn}/incidents/*"
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub "${IncidentDataLake.Arn}/runbooks/*"
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                Resource: !GetAtt IncidentsTable.Arn
+        - PolicyName: bedrock-invoke
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:Retrieve
+                  - bedrock:RetrieveAndGenerate
+                Resource: '*'
+
+  # ---------------------------------------------------------------------------
+  # IAM role: remediation Lambda.
+  # Tightly scoped to ONLY the specific actions in actions.py. No wildcards.
+  # ---------------------------------------------------------------------------
+  RemediationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "incident-remediation-role-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: remediation-read-write
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:UpdateItem
+                Resource: !GetAtt IncidentsTable.Arn
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub "${IncidentDataLake.Arn}/incidents/*"
+        - PolicyName: remediation-actions
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # scale_up - Application Auto Scaling + ECS update service
+              - Effect: Allow
+                Action:
+                  - application-autoscaling:RegisterScalableTarget
+                  - application-autoscaling:PutScalingPolicy
+                  - application-autoscaling:DeregisterScalableTarget
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - ecs:UpdateService
+                  - ecs:DescribeServices
+                Resource: '*'
+              # restart_service / restart_downstream_service - force new deployment
+              - Effect: Allow
+                Action:
+                  - ecs:StopTask
+                  - ecs:ListTasks
+                  - ecs:DescribeTasks
+                Resource: '*'
+              # lock_s3_bucket - PutPublicAccessBlock on any bucket
+              - Effect: Allow
+                Action:
+                  - s3:PutPublicAccessBlock
+                Resource: '*'
+              # tighten_iam_policy - attach pre-defined safe policy
+              - Effect: Allow
+                Action:
+                  - iam:PutRolePolicy
+                  - iam:DeleteRolePolicy
+                  - iam:ListRolePolicies
+                Resource: '*'
+
+Outputs:
+  IncidentDataLakeName:
+    Description: Name of the S3 data lake bucket
+    Value: !Ref IncidentDataLake
+  IncidentsTableName:
+    Description: Name of the DynamoDB incidents table
+    Value: !Ref IncidentsTable
+  CollectorDiagnosisRoleArn:
+    Description: ARN of the collector/diagnosis IAM role
+    Value: !GetAtt CollectorDiagnosisRole.Arn
+  RemediationRoleArn:
+    Description: ARN of the remediation IAM role
+    Value: !GetAtt RemediationRole.Arn
