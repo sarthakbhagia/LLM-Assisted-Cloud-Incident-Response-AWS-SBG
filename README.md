@@ -87,9 +87,12 @@ think of it as renting computers and utilities instead of buying your own.
 LLM-Assisted-Cloud-Incident-Response-AWS-SBG/
 ├── infra/
 │   ├── template.yaml              # SAM template: every AWS resource defined here
-│   └── demo-app/                  # the toy app we break on purpose (services A/B/C)
+│   └── samconfig.toml             # deployment defaults
 ├── src/
-│   ├── detectors/                 # detection config (alarms, rules, EventBridge)
+│   ├── service_a/app.py           # /start, calls Service B
+│   ├── service_b/app.py           # /service-b, calls Service C
+│   ├── service_c/app.py           # /service-c
+│   ├── detectors/                 # detection config (Phase 2)
 │   ├── collector/                 # gathers evidence on trigger (collector_lambda)
 │   ├── diagnosis/                 # Bedrock call + prompts (diagnosis_lambda)
 │   ├── remediation/               # executes the approved fix (remediation_lambda)
@@ -133,7 +136,7 @@ Build phases, in order. We do them one at a time and confirm each works before
 moving on.
 
 - [x] **Phase 0 — Infra bootstrap**: SAM skeleton, S3 data lake, DynamoDB table, IAM roles deployed via `sam deploy`.
-- [ ] **Phase 1 — Demo app**: build services A/B/C, confirm they talk to each other.
+- [x] **Phase 1 — Demo app**: services A/B/C, API endpoints, and end-to-end service calls.
 - [ ] **Phase 2 — Detection**: alarms, Config rules, GuardDuty, EventBridge rules.
 - [ ] **Phase 3 — Data collection**: `collector_lambda` writes evidence to S3 + DynamoDB.
 - [ ] **Phase 4 — Knowledge base + diagnosis**: runbooks, Bedrock KB, `diagnosis_lambda`.
@@ -184,6 +187,43 @@ You'll need a Mac/Linux machine and an AWS account with credentials.
    `--stack-name llm-incident-response --region ap-south-1 --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM`.
 
 ---
+
+## Phase 1 demo application
+
+The demo application is a simple HTTP chain deployed as three Lambda functions:
+
+```mermaid
+flowchart LR
+   Client --> A[GET /start<br/>Service A]
+   A --> B[GET /service-b<br/>Service B]
+   B --> C[GET /service-c<br/>Service C]
+```
+
+The deployed API Gateway URLs are available in the CloudFormation outputs
+`ServiceAUrl`, `ServiceBUrl`, and `ServiceCUrl`. Service A and Service B use
+environment variables for their downstream URLs. A downstream HTTP error or
+timeout is returned as a 5xx response and logged with status and latency.
+
+Build and validate from the repository root:
+
+```bash
+sam validate --template-file infra/template.yaml
+sam build --template-file infra/template.yaml
+```
+
+Deploy manually when ready:
+
+```bash
+sam deploy --template-file infra/template.yaml --config-env default
+```
+
+After deployment, test the complete chain with the Service A output URL:
+
+```bash
+curl "<ServiceAUrl>"
+```
+
+The response should have HTTP 200 and `"overall_status": "success"`.
 
 ## Team workstreams
 

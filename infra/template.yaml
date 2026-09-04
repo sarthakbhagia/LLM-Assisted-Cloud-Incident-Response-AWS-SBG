@@ -18,6 +18,16 @@ Parameters:
     AllowedValues: [dev, staging, prod]
     Description: Deployment environment, used to suffix resource names.
 
+  ServiceBUrl:
+    Type: String
+    Default: "http://placeholder-service-b"
+    Description: HTTP endpoint used by Service A to call Service B.
+
+  ServiceCUrl:
+    Type: String
+    Default: "http://placeholder-service-c"
+    Description: HTTP endpoint used by Service B to call Service C.
+
 Resources:
 
   # ---------------------------------------------------------------------------
@@ -194,19 +204,22 @@ Resources:
                   - ecs:UpdateService
                   - ecs:DescribeServices
                 Resource: '*'
-              # restart_service / restart_downstream_service - force new deployment
+
+              # restart_service / restart_downstream_service
               - Effect: Allow
                 Action:
                   - ecs:StopTask
                   - ecs:ListTasks
                   - ecs:DescribeTasks
                 Resource: '*'
-              # lock_s3_bucket - PutPublicAccessBlock on any bucket
+
+              # lock_s3_bucket
               - Effect: Allow
                 Action:
                   - s3:PutPublicAccessBlock
                 Resource: '*'
-              # tighten_iam_policy - attach pre-defined safe policy
+
+              # tighten_iam_policy
               - Effect: Allow
                 Action:
                   - iam:PutRolePolicy
@@ -214,16 +227,116 @@ Resources:
                   - iam:ListRolePolicies
                 Resource: '*'
 
+  # ===========================================================================
+  # PHASE 1 - DEMO APPLICATION
+  # Service A -> Service B -> Service C
+  # ===========================================================================
+
+  # ---------------------------------------------------------------------------
+  # IAM role for demo application
+  # ---------------------------------------------------------------------------
+  DemoAppRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "incident-demo-app-role-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  # ---------------------------------------------------------------------------
+  # Service C
+  # ---------------------------------------------------------------------------
+  ServiceCFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../src/service_c/
+      Handler: app.lambda_handler
+      Role: !GetAtt DemoAppRole.Arn
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            Path: /service-c
+            Method: get
+
+  # ---------------------------------------------------------------------------
+  # Service B
+  # ---------------------------------------------------------------------------
+  ServiceBFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../src/service_b/
+      Handler: app.lambda_handler
+      Role: !GetAtt DemoAppRole.Arn
+      Environment:
+        Variables:
+          SERVICE_C_URL: !Ref ServiceCUrl
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            Path: /service-b
+            Method: get
+
+  # ---------------------------------------------------------------------------
+  # Service A
+  # ---------------------------------------------------------------------------
+  ServiceAFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../src/service_a/
+      Handler: app.lambda_handler
+      Role: !GetAtt DemoAppRole.Arn
+      Environment:
+        Variables:
+          SERVICE_B_URL: !Ref ServiceBUrl
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            Path: /start
+            Method: get
+
+# =============================================================================
+# OUTPUTS
+# =============================================================================
+
 Outputs:
+
   IncidentDataLakeName:
     Description: Name of the S3 data lake bucket
     Value: !Ref IncidentDataLake
+
   IncidentsTableName:
     Description: Name of the DynamoDB incidents table
     Value: !Ref IncidentsTable
+
   CollectorDiagnosisRoleArn:
     Description: ARN of the collector/diagnosis IAM role
     Value: !GetAtt CollectorDiagnosisRole.Arn
+
   RemediationRoleArn:
-    Description: ARN of the remediation IAM role
+    Description: ARN of the remediation Lambda role
     Value: !GetAtt RemediationRole.Arn
+
+  DemoAppRoleArn:
+    Description: ARN of the Phase 1 demo application role
+    Value: !GetAtt DemoAppRole.Arn
+
+  ServiceAUrl:
+    Description: Phase 1 entry point
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/start"
+
+  ServiceBUrl:
+    Description: Service B endpoint
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/service-b"
+
+  ServiceCUrl:
+    Description: Service C endpoint
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/service-c"
