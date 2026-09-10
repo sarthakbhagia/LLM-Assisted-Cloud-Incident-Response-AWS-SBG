@@ -69,13 +69,8 @@ def lambda_handler(event, context):
         }
         return _json_response(200, response)
 
-    response = {
-        "service": "A",
-        "status": "error",
-        "service_b_response": service_b_response,
-        "overall_status": "failure",
-    }
-    return _json_response(504 if status_code is None else 502, response)
+    logger.error("Service A downstream dependency failed; raising an exception so the Lambda Errors metric increments for Phase 2 detection.")
+    raise RuntimeError(f"Service A downstream failure detected: status_code={status_code}, response={service_b_response}")
 
 
 def _json_response(status_code, body):

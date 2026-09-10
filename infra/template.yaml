@@ -302,7 +302,310 @@ Resources:
           Properties:
             Path: /start
             Method: get
+  # =========================================================================== 
+  # PHASE 2 - DETECTION
+  # Collector Lambda receives detection events from EventBridge.
+  # Full evidence collection will be implemented in Phase 3.
+  # ===========================================================================
+    # ---------------------------------------------------------------------------
+  # PHASE 2 - Resource Exhaustion Detection
+  # Lambda execution taking too long can indicate resource pressure.
+  # ---------------------------------------------------------------------------
 
+  ServiceAResourceExhaustionAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "incident-service-a-resource-exhaustion-${Environment}"
+      AlarmDescription: Detects unusually long Service A Lambda executions
+      Namespace: AWS/Lambda
+      MetricName: Duration
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref ServiceAFunction
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 2
+      DatapointsToAlarm: 2
+      Threshold: 50000
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+   # ---------------------------------------------------------------------------
+  # PHASE 2 - Service Error Detection
+  # Repeated Lambda errors are an incident detection signal.
+  # ---------------------------------------------------------------------------
+
+  ServiceAErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "incident-service-a-errors-${Environment}"
+      AlarmDescription: Detects repeated errors from Service A
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref ServiceAFunction
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 2
+      DatapointsToAlarm: 2
+      Threshold: 5
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  CollectorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../src/collector/
+      Handler: app.lambda_handler
+      Role: !GetAtt CollectorDiagnosisRole.Arn
+      Description: Receives incident detection events from EventBridge
+
+  # ---------------------------------------------------------------------------
+  # PHASE 2 - EventBridge routing for CloudWatch alarms
+  # ---------------------------------------------------------------------------
+  CloudWatchIncidentEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "incident-cloudwatch-detection-${Environment}"
+      Description: Routes resource exhaustion alarm events to the collector
+      EventPattern:
+        source:
+          - aws.cloudwatch
+        detail-type:
+          - "CloudWatch Alarm State Change"
+        detail:
+          state:
+            value:
+              - ALARM
+          alarmName:
+            - !Sub "incident-service-a-resource-exhaustion-${Environment}"
+      Targets:
+        - Arn: !GetAtt CollectorFunction.Arn
+          Id: CollectorTarget
+          InputTransformer:
+            InputPathsMap:
+              alarm_name: "$.detail.alarmName"
+              state: "$.detail.state.value"
+              reason: "$.detail.state.reason"
+            InputTemplate: |
+              {
+                "source": "cloudwatch",
+                "fault_class": "resource_exhaustion",
+                "alarm_name": <alarm_name>,
+                "state": <state>,
+                "reason": <reason>
+              }
+
+  CloudWatchIncidentEventPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref CollectorFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt CloudWatchIncidentEventRule.Arn
+  # ===========================================================================
+  # PHASE 2 - AWS CONFIG DETECTION
+  # Detects potentially unsafe AWS configurations.
+  # ===========================================================================
+
+  ConfigRecorder:
+    Type: AWS::Config::ConfigurationRecorder
+    Properties:
+      Name: !Sub "incident-config-recorder-${Environment}"
+      RecordingGroup:
+        AllSupported: true
+        IncludeGlobalResourceTypes: true
+      RoleARN: !GetAtt ConfigRole.Arn
+
+  ConfigDeliveryChannel:
+    Type: AWS::Config::DeliveryChannel
+    Properties:
+      Name: !Sub "incident-config-delivery-${Environment}"
+      S3BucketName: !Ref IncidentDataLake
+
+  ConfigRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "incident-config-role-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - config.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWS_ConfigRole
+
+  PublicS3BucketConfigRule:
+    Type: AWS::Config::ConfigRule
+    DependsOn: [ConfigRecorder, ConfigDeliveryChannel]
+    Properties:
+      ConfigRuleName: !Sub "incident-public-s3-${Environment}"
+      Description: Detects S3 buckets with public access
+      Source:
+        Owner: AWS
+        SourceIdentifier: S3_BUCKET_PUBLIC_READ_PROHIBITED
+
+  IAMPolicyConfigRule:
+    Type: AWS::Config::ConfigRule
+    DependsOn: [ConfigRecorder, ConfigDeliveryChannel]
+    Properties:
+      ConfigRuleName: !Sub "incident-iam-policy-${Environment}"
+      Description: Detects IAM policies that may be overly permissive
+      Source:
+        Owner: AWS
+        SourceIdentifier: IAM_POLICY_NO_STATEMENTS_WITH_ADMIN_ACCESS
+  ConfigIncidentEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "incident-config-detection-${Environment}"
+      Description: Routes AWS Config non-compliance events to the collector
+      EventPattern:
+        source:
+          - aws.config
+        detail-type:
+          - "Config Rules Compliance Change"
+        detail:
+          newEvaluationResult:
+            complianceType:
+              - NON_COMPLIANT
+      Targets:
+        - Arn: !GetAtt CollectorFunction.Arn
+          Id: ConfigCollectorTarget
+          InputTransformer:
+            InputPathsMap:
+              rule_name: "$.detail.configRuleName"
+              resource_type: "$.detail.resourceType"
+              resource_id: "$.detail.resourceId"
+            InputTemplate: |
+              {
+                "source": "aws_config",
+                "fault_class": "misconfiguration",
+                "config_rule": <rule_name>,
+                "resource_type": <resource_type>,
+                "resource_id": <resource_id>
+              }
+
+  ConfigIncidentEventPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref CollectorFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ConfigIncidentEventRule.Arn
+
+  GuardDutyIncidentEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "incident-guardduty-detection-${Environment}"
+      Description: Routes relevant GuardDuty findings to the collector
+      EventPattern:
+        source:
+          - aws.guardduty
+        detail-type:
+          - "GuardDuty Finding"
+      Targets:
+        - Arn: !GetAtt CollectorFunction.Arn
+          Id: GuardDutyCollectorTarget
+
+  GuardDutyIncidentEventPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref CollectorFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt GuardDutyIncidentEventRule.Arn
+
+  ServiceCHighLatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "incident-service-c-latency-${Environment}"
+      Namespace: AWS/Lambda
+      MetricName: Duration
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref ServiceCFunction
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 2
+      DatapointsToAlarm: 2
+      Threshold: 3000
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  ServiceCascadeCompositeAlarm:
+    Type: AWS::CloudWatch::CompositeAlarm
+    Properties:
+      AlarmName: !Sub "incident-service-cascade-${Environment}"
+      AlarmRule: !Sub "ALARM(\"incident-service-a-errors-${Environment}\") AND ALARM(\"incident-service-c-latency-${Environment}\")"
+    DependsOn:
+      - ServiceAErrorAlarm
+      - ServiceCHighLatencyAlarm
+
+  CascadeIncidentEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "incident-cascade-detection-${Environment}"
+      EventPattern:
+        source:
+          - aws.cloudwatch
+        detail-type:
+          - "CloudWatch Alarm State Change"
+        detail:
+          state:
+            value:
+              - ALARM
+          alarmName:
+            - !Sub "incident-service-cascade-${Environment}"
+      Targets:
+        - Arn: !GetAtt CollectorFunction.Arn
+          Id: CascadeCollectorTarget
+          InputTransformer:
+            InputPathsMap:
+              alarm_name: "$.detail.alarmName"
+              state: "$.detail.state.value"
+            InputTemplate: |
+              {
+                "source": "cloudwatch",
+                "fault_class": "service_cascade",
+                "alarm_name": <alarm_name>,
+                "state": <state>
+              }
+
+  CascadeIncidentEventPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref CollectorFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt CascadeIncidentEventRule.Arn
+
+  IncidentDataLakeConfigPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref IncidentDataLake
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AWSConfigBucketPermissionsCheck
+            Effect: Allow
+            Principal:
+              Service: config.amazonaws.com
+            Action: s3:GetBucketAcl
+            Resource: !GetAtt IncidentDataLake.Arn
+          - Sid: AWSConfigBucketDelivery
+            Effect: Allow
+            Principal:
+              Service: config.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub "${IncidentDataLake.Arn}/AWSLogs/${AWS::AccountId}/Config/*"
+            Condition:
+              StringEquals:
+                s3:x-amz-acl: bucket-owner-full-control
 # =============================================================================
 # OUTPUTS
 # =============================================================================
