@@ -1,0 +1,645 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  LLM-Assisted Cloud Incident Response - serverless pipeline.
+  Phase 0: infra skeleton (data lake, incident table, IAM roles).
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Timeout: 60
+    MemorySize: 256
+    Architectures: [arm64]
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+    Description: Deployment environment, used to suffix resource names.
+
+  ServiceBUrl:
+    Type: String
+    Default: "http://placeholder-service-b"
+    Description: HTTP endpoint used by Service A to call Service B.
+
+  ServiceCUrl:
+    Type: String
+    Default: "http://placeholder-service-c"
+    Description: HTTP endpoint used by Service B to call Service C.
+
+Resources:
+
+  # ---------------------------------------------------------------------------
+  # Incident data lake (raw observability bundles + runbook docs)
+  # ---------------------------------------------------------------------------
+  IncidentDataLake:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "llm-incident-datalake-${AWS::AccountId}-${Environment}"
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  # ---------------------------------------------------------------------------
+  # Structured incident records
+  # ---------------------------------------------------------------------------
+  IncidentsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "incidents-${Environment}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: incident_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: incident_id
+          KeyType: HASH
+      StreamSpecification:
+        StreamViewType: NEW_IMAGE
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  # ---------------------------------------------------------------------------
+  # IAM role: collector + diagnosis Lambdas.
+  # Read-only observability access + Bedrock invoke + S3/DynamoDB write.
+  # ---------------------------------------------------------------------------
+  CollectorDiagnosisRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "incident-collector-diagnosis-role-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: observability-read
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:DescribeLogGroups
+                  - logs:GetLogEvents
+                  - logs:FilterLogEvents
+                  - logs:StartQuery
+                  - logs:GetQueryResults
+                  - logs:DescribeLogStreams
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - cloudwatch:GetMetricData
+                  - cloudwatch:GetMetricStatistics
+                  - cloudwatch:ListMetrics
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - xray:GetTraceSummaries
+                  - xray:BatchGetTraces
+                  - xray:GetServiceGraph
+                  - xray:GetTraceGraph
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - config:GetComplianceDetailsByConfigRule
+                  - config:GetResourceConfigHistory
+                  - config:DescribeComplianceByConfigRule
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - guardduty:GetFindings
+                  - guardduty:ListFindings
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - ecs:DescribeServices
+                  - ecs:DescribeTasks
+                  - ecs:ListServices
+                  - ecs:ListTasks
+                Resource: '*'
+        - PolicyName: datalake-write
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                Resource: !Sub "${IncidentDataLake.Arn}/incidents/*"
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub "${IncidentDataLake.Arn}/runbooks/*"
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                Resource: !GetAtt IncidentsTable.Arn
+        - PolicyName: bedrock-invoke
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:Retrieve
+                  - bedrock:RetrieveAndGenerate
+                Resource: '*'
+
+  # ---------------------------------------------------------------------------
+  # IAM role: remediation Lambda.
+  # Tightly scoped to ONLY the specific actions in actions.py. No wildcards.
+  # ---------------------------------------------------------------------------
+  RemediationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "incident-remediation-role-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: remediation-read-write
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:UpdateItem
+                Resource: !GetAtt IncidentsTable.Arn
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub "${IncidentDataLake.Arn}/incidents/*"
+        - PolicyName: remediation-actions
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # scale_up - Application Auto Scaling + ECS update service
+              - Effect: Allow
+                Action:
+                  - application-autoscaling:RegisterScalableTarget
+                  - application-autoscaling:PutScalingPolicy
+                  - application-autoscaling:DeregisterScalableTarget
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - ecs:UpdateService
+                  - ecs:DescribeServices
+                Resource: '*'
+
+              # restart_service / restart_downstream_service
+              - Effect: Allow
+                Action:
+                  - ecs:StopTask
+                  - ecs:ListTasks
+                  - ecs:DescribeTasks
+                Resource: '*'
+
+              # lock_s3_bucket
+              - Effect: Allow
+                Action:
+                  - s3:PutPublicAccessBlock
+                Resource: '*'
+
+              # tighten_iam_policy
+              - Effect: Allow
+                Action:
+                  - iam:PutRolePolicy
+                  - iam:DeleteRolePolicy
+                  - iam:ListRolePolicies
+                Resource: '*'
+
+  # ===========================================================================
+  # PHASE 1 - DEMO APPLICATION
+  # Service A -> Service B -> Service C
+  # ===========================================================================
+
+  # ---------------------------------------------------------------------------
+  # IAM role for demo application
+  # ---------------------------------------------------------------------------
+  DemoAppRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "incident-demo-app-role-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  # ---------------------------------------------------------------------------
+  # Service C
+  # ---------------------------------------------------------------------------
+  ServiceCFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../src/service_c/
+      Handler: app.lambda_handler
+      Role: !GetAtt DemoAppRole.Arn
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            Path: /service-c
+            Method: get
+
+  # ---------------------------------------------------------------------------
+  # Service B
+  # ---------------------------------------------------------------------------
+  ServiceBFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../src/service_b/
+      Handler: app.lambda_handler
+      Role: !GetAtt DemoAppRole.Arn
+      Environment:
+        Variables:
+          SERVICE_C_URL: !Ref ServiceCUrl
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            Path: /service-b
+            Method: get
+
+  # ---------------------------------------------------------------------------
+  # Service A
+  # ---------------------------------------------------------------------------
+  ServiceAFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../src/service_a/
+      Handler: app.lambda_handler
+      Role: !GetAtt DemoAppRole.Arn
+      Environment:
+        Variables:
+          SERVICE_B_URL: !Ref ServiceBUrl
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            Path: /start
+            Method: get
+  # =========================================================================== 
+  # PHASE 2 - DETECTION
+  # Collector Lambda receives detection events from EventBridge.
+  # Full evidence collection will be implemented in Phase 3.
+  # ===========================================================================
+    # ---------------------------------------------------------------------------
+  # PHASE 2 - Resource Exhaustion Detection
+  # Lambda execution taking too long can indicate resource pressure.
+  # ---------------------------------------------------------------------------
+
+  ServiceAResourceExhaustionAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "incident-service-a-resource-exhaustion-${Environment}"
+      AlarmDescription: Detects unusually long Service A Lambda executions
+      Namespace: AWS/Lambda
+      MetricName: Duration
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref ServiceAFunction
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 2
+      DatapointsToAlarm: 2
+      Threshold: 50000
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+   # ---------------------------------------------------------------------------
+  # PHASE 2 - Service Error Detection
+  # Repeated Lambda errors are an incident detection signal.
+  # ---------------------------------------------------------------------------
+
+  ServiceAErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "incident-service-a-errors-${Environment}"
+      AlarmDescription: Detects repeated errors from Service A
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref ServiceAFunction
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 2
+      DatapointsToAlarm: 2
+      Threshold: 5
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  CollectorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../src/collector/
+      Handler: app.lambda_handler
+      Role: !GetAtt CollectorDiagnosisRole.Arn
+      Description: Receives incident detection events from EventBridge
+
+  # ---------------------------------------------------------------------------
+  # PHASE 2 - EventBridge routing for CloudWatch alarms
+  # ---------------------------------------------------------------------------
+  CloudWatchIncidentEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "incident-cloudwatch-detection-${Environment}"
+      Description: Routes resource exhaustion alarm events to the collector
+      EventPattern:
+        source:
+          - aws.cloudwatch
+        detail-type:
+          - "CloudWatch Alarm State Change"
+        detail:
+          state:
+            value:
+              - ALARM
+          alarmName:
+            - !Sub "incident-service-a-resource-exhaustion-${Environment}"
+      Targets:
+        - Arn: !GetAtt CollectorFunction.Arn
+          Id: CollectorTarget
+          InputTransformer:
+            InputPathsMap:
+              alarm_name: "$.detail.alarmName"
+              state: "$.detail.state.value"
+              reason: "$.detail.state.reason"
+            InputTemplate: |
+              {
+                "source": "cloudwatch",
+                "fault_class": "resource_exhaustion",
+                "alarm_name": <alarm_name>,
+                "state": <state>,
+                "reason": <reason>
+              }
+
+  CloudWatchIncidentEventPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref CollectorFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt CloudWatchIncidentEventRule.Arn
+  # ===========================================================================
+  # PHASE 2 - AWS CONFIG DETECTION
+  # Detects potentially unsafe AWS configurations.
+  # ===========================================================================
+
+  ConfigRecorder:
+    Type: AWS::Config::ConfigurationRecorder
+    Properties:
+      Name: !Sub "incident-config-recorder-${Environment}"
+      RecordingGroup:
+        AllSupported: true
+        IncludeGlobalResourceTypes: true
+      RoleARN: !GetAtt ConfigRole.Arn
+
+  ConfigDeliveryChannel:
+    Type: AWS::Config::DeliveryChannel
+    Properties:
+      Name: !Sub "incident-config-delivery-${Environment}"
+      S3BucketName: !Ref IncidentDataLake
+
+  ConfigRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "incident-config-role-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - config.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWS_ConfigRole
+
+  PublicS3BucketConfigRule:
+    Type: AWS::Config::ConfigRule
+    DependsOn: [ConfigRecorder, ConfigDeliveryChannel]
+    Properties:
+      ConfigRuleName: !Sub "incident-public-s3-${Environment}"
+      Description: Detects S3 buckets with public access
+      Source:
+        Owner: AWS
+        SourceIdentifier: S3_BUCKET_PUBLIC_READ_PROHIBITED
+
+  IAMPolicyConfigRule:
+    Type: AWS::Config::ConfigRule
+    DependsOn: [ConfigRecorder, ConfigDeliveryChannel]
+    Properties:
+      ConfigRuleName: !Sub "incident-iam-policy-${Environment}"
+      Description: Detects IAM policies that may be overly permissive
+      Source:
+        Owner: AWS
+        SourceIdentifier: IAM_POLICY_NO_STATEMENTS_WITH_ADMIN_ACCESS
+  ConfigIncidentEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "incident-config-detection-${Environment}"
+      Description: Routes AWS Config non-compliance events to the collector
+      EventPattern:
+        source:
+          - aws.config
+        detail-type:
+          - "Config Rules Compliance Change"
+        detail:
+          newEvaluationResult:
+            complianceType:
+              - NON_COMPLIANT
+      Targets:
+        - Arn: !GetAtt CollectorFunction.Arn
+          Id: ConfigCollectorTarget
+          InputTransformer:
+            InputPathsMap:
+              rule_name: "$.detail.configRuleName"
+              resource_type: "$.detail.resourceType"
+              resource_id: "$.detail.resourceId"
+            InputTemplate: |
+              {
+                "source": "aws_config",
+                "fault_class": "misconfiguration",
+                "config_rule": <rule_name>,
+                "resource_type": <resource_type>,
+                "resource_id": <resource_id>
+              }
+
+  ConfigIncidentEventPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref CollectorFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ConfigIncidentEventRule.Arn
+
+  GuardDutyIncidentEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "incident-guardduty-detection-${Environment}"
+      Description: Routes relevant GuardDuty findings to the collector
+      EventPattern:
+        source:
+          - aws.guardduty
+        detail-type:
+          - "GuardDuty Finding"
+      Targets:
+        - Arn: !GetAtt CollectorFunction.Arn
+          Id: GuardDutyCollectorTarget
+
+  GuardDutyIncidentEventPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref CollectorFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt GuardDutyIncidentEventRule.Arn
+
+  ServiceCHighLatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "incident-service-c-latency-${Environment}"
+      Namespace: AWS/Lambda
+      MetricName: Duration
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref ServiceCFunction
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 2
+      DatapointsToAlarm: 2
+      Threshold: 3000
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  ServiceCascadeCompositeAlarm:
+    Type: AWS::CloudWatch::CompositeAlarm
+    Properties:
+      AlarmName: !Sub "incident-service-cascade-${Environment}"
+      AlarmRule: !Sub "ALARM(\"incident-service-a-errors-${Environment}\") AND ALARM(\"incident-service-c-latency-${Environment}\")"
+    DependsOn:
+      - ServiceAErrorAlarm
+      - ServiceCHighLatencyAlarm
+
+  CascadeIncidentEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "incident-cascade-detection-${Environment}"
+      EventPattern:
+        source:
+          - aws.cloudwatch
+        detail-type:
+          - "CloudWatch Alarm State Change"
+        detail:
+          state:
+            value:
+              - ALARM
+          alarmName:
+            - !Sub "incident-service-cascade-${Environment}"
+      Targets:
+        - Arn: !GetAtt CollectorFunction.Arn
+          Id: CascadeCollectorTarget
+          InputTransformer:
+            InputPathsMap:
+              alarm_name: "$.detail.alarmName"
+              state: "$.detail.state.value"
+            InputTemplate: |
+              {
+                "source": "cloudwatch",
+                "fault_class": "service_cascade",
+                "alarm_name": <alarm_name>,
+                "state": <state>
+              }
+
+  CascadeIncidentEventPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref CollectorFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt CascadeIncidentEventRule.Arn
+
+  IncidentDataLakeConfigPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref IncidentDataLake
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AWSConfigBucketPermissionsCheck
+            Effect: Allow
+            Principal:
+              Service: config.amazonaws.com
+            Action: s3:GetBucketAcl
+            Resource: !GetAtt IncidentDataLake.Arn
+          - Sid: AWSConfigBucketDelivery
+            Effect: Allow
+            Principal:
+              Service: config.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub "${IncidentDataLake.Arn}/AWSLogs/${AWS::AccountId}/Config/*"
+            Condition:
+              StringEquals:
+                s3:x-amz-acl: bucket-owner-full-control
+# =============================================================================
+# OUTPUTS
+# =============================================================================
+
+Outputs:
+
+  IncidentDataLakeName:
+    Description: Name of the S3 data lake bucket
+    Value: !Ref IncidentDataLake
+
+  IncidentsTableName:
+    Description: Name of the DynamoDB incidents table
+    Value: !Ref IncidentsTable
+
+  CollectorDiagnosisRoleArn:
+    Description: ARN of the collector/diagnosis IAM role
+    Value: !GetAtt CollectorDiagnosisRole.Arn
+
+  RemediationRoleArn:
+    Description: ARN of the remediation Lambda role
+    Value: !GetAtt RemediationRole.Arn
+
+  DemoAppRoleArn:
+    Description: ARN of the Phase 1 demo application role
+    Value: !GetAtt DemoAppRole.Arn
+
+  ServiceAUrl:
+    Description: Phase 1 entry point
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/start"
+
+  ServiceBUrl:
+    Description: Service B endpoint
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/service-b"
+
+  ServiceCUrl:
+    Description: Service C endpoint
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/service-c"

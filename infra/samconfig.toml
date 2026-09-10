@@ -1,0 +1,14 @@
+version = 0.1
+[default.deploy.parameters]
+stack_name = "llm-incident-response"
+s3_bucket = "aws-sam-cli-managed-default-samclisourcebucket-zljhok7tvrok"
+s3_prefix = "llm-incident-response"
+confirm_changeset = true
+capabilities = "CAPABILITY_IAM CAPABILITY_NAMED_IAM"
+disable_rollback = true
+image_repositories = []
+parameter_overrides = "Environment=\"dev\" ServiceBUrl=\"https://0wv3y5mpal.execute-api.ap-south-1.amazonaws.com/Prod/service-b\" ServiceCUrl=\"https://0wv3y5mpal.execute-api.ap-south-1.amazonaws.com/Prod/service-c\""
+resolve_s3 = true
+
+[default.global.parameters]
+region = "ap-south-1"
