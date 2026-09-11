@@ -1,0 +1,36 @@
+{
+  "id": "test-event-123",
+  "source": "aws.cloudwatch",
+  "detail-type": "CloudWatch Alarm State Change",
+  "time": "2026-09-10T12:00:00Z",
+  "region": "ap-south-1",
+  "account": "123456789012",
+  "fault_class": "resource_exhaustion",
+  "detail": {
+    "alarmName": "incident-service-a-resource-exhaustion-dev",
+    "alarmArn": "arn:aws:cloudwatch:ap-south-1:123456789012:alarm:incident-service-a-resource-exhaustion-dev",
+    "state": {
+      "value": "ALARM",
+      "reason": "Threshold Crossed: 2 datapoints were greater than the threshold"
+    },
+    "previousState": {
+      "value": "OK",
+      "reason": "Threshold not breached"
+    },
+    "configuration": {
+      "metricName": "Duration",
+      "namespace": "AWS/Lambda",
+      "statistic": "Maximum",
+      "period": 60,
+      "evaluationPeriods": 2,
+      "threshold": 50000,
+      "comparisonOperator": "GreaterThanThreshold",
+      "dimensions": [
+        {
+          "name": "FunctionName",
+          "value": "service-a-dev"
+        }
+      ]
+    }
+  }
+}

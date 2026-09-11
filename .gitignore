@@ -1,4 +1,4 @@
+env.json
 .aws-sam/
 __pycache__/
 *.pyc
-.evaluation_tmp/

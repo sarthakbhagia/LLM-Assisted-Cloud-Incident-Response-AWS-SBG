@@ -18,6 +18,16 @@ Parameters:
     AllowedValues: [dev, staging, prod]
     Description: Deployment environment, used to suffix resource names.
 
+  ServiceBUrl:
+    Type: String
+    Default: "http://placeholder-service-b"
+    Description: HTTP endpoint used by Service A to call Service B.
+
+  ServiceCUrl:
+    Type: String
+    Default: "http://placeholder-service-c"
+    Description: HTTP endpoint used by Service B to call Service C.
+
 Resources:
 
   # ---------------------------------------------------------------------------
@@ -213,6 +223,301 @@ Resources:
                   - iam:DeleteRolePolicy
                   - iam:ListRolePolicies
                 Resource: '*'
+
+  DemoAppRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "incident-demo-app-role-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  ServiceCFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../src/service_c/
+      Handler: app.lambda_handler
+      Role: !GetAtt DemoAppRole.Arn
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            Path: /service-c
+            Method: get
+
+  ServiceBFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../src/service_b/
+      Handler: app.lambda_handler
+      Role: !GetAtt DemoAppRole.Arn
+      Environment:
+        Variables:
+          SERVICE_C_URL: !Ref ServiceCUrl
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            Path: /service-b
+            Method: get
+
+  ServiceAFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../src/service_a/
+      Handler: app.lambda_handler
+      Role: !GetAtt DemoAppRole.Arn
+      Environment:
+        Variables:
+          SERVICE_B_URL: !Ref ServiceBUrl
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            Path: /start
+            Method: get
+
+  ServiceAResourceExhaustionAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "incident-service-a-resource-exhaustion-${Environment}"
+      AlarmDescription: Detects unusually long Service A Lambda executions
+      Namespace: AWS/Lambda
+      MetricName: Duration
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref ServiceAFunction
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 2
+      DatapointsToAlarm: 2
+      Threshold: 50000
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  ServiceAErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "incident-service-a-errors-${Environment}"
+      AlarmDescription: Detects repeated errors from Service A
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref ServiceAFunction
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 2
+      DatapointsToAlarm: 2
+      Threshold: 5
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  CollectorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../src/collector/
+      Handler: app.lambda_handler
+      Role: !GetAtt CollectorDiagnosisRole.Arn
+      Description: Collects detection evidence into S3 and DynamoDB
+      Environment:
+        Variables:
+          INCIDENT_DATA_LAKE_BUCKET: !Ref IncidentDataLake
+          INCIDENTS_TABLE_NAME: !Ref IncidentsTable
+
+  CloudWatchIncidentEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "incident-cloudwatch-detection-${Environment}"
+      Description: Routes resource exhaustion alarm events to the collector
+      EventPattern:
+        source: [aws.cloudwatch]
+        detail-type: ["CloudWatch Alarm State Change"]
+        detail:
+          state:
+            value: [ALARM]
+          alarmName:
+            - !Sub "incident-service-a-resource-exhaustion-${Environment}"
+      Targets:
+        - Arn: !GetAtt CollectorFunction.Arn
+          Id: CollectorTarget
+
+  CloudWatchIncidentEventPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref CollectorFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt CloudWatchIncidentEventRule.Arn
+
+  ConfigRecorder:
+    Type: AWS::Config::ConfigurationRecorder
+    Properties:
+      Name: !Sub "incident-config-recorder-${Environment}"
+      RecordingGroup:
+        AllSupported: true
+        IncludeGlobalResourceTypes: true
+      RoleARN: !GetAtt ConfigRole.Arn
+
+  ConfigDeliveryChannel:
+    Type: AWS::Config::DeliveryChannel
+    Properties:
+      Name: !Sub "incident-config-delivery-${Environment}"
+      S3BucketName: !Ref IncidentDataLake
+
+  ConfigRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "incident-config-role-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: config.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWS_ConfigRole
+
+  PublicS3BucketConfigRule:
+    Type: AWS::Config::ConfigRule
+    DependsOn: [ConfigRecorder, ConfigDeliveryChannel]
+    Properties:
+      ConfigRuleName: !Sub "incident-public-s3-${Environment}"
+      Description: Detects S3 buckets with public access
+      Source:
+        Owner: AWS
+        SourceIdentifier: S3_BUCKET_PUBLIC_READ_PROHIBITED
+
+  IAMPolicyConfigRule:
+    Type: AWS::Config::ConfigRule
+    DependsOn: [ConfigRecorder, ConfigDeliveryChannel]
+    Properties:
+      ConfigRuleName: !Sub "incident-iam-policy-${Environment}"
+      Description: Detects IAM policies that may be overly permissive
+      Source:
+        Owner: AWS
+        SourceIdentifier: IAM_POLICY_NO_STATEMENTS_WITH_ADMIN_ACCESS
+
+  ConfigIncidentEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "incident-config-detection-${Environment}"
+      Description: Routes AWS Config non-compliance events to the collector
+      EventPattern:
+        source: [aws.config]
+        detail-type: ["Config Rules Compliance Change"]
+        detail:
+          newEvaluationResult:
+            complianceType: [NON_COMPLIANT]
+      Targets:
+        - Arn: !GetAtt CollectorFunction.Arn
+          Id: ConfigCollectorTarget
+
+  ConfigIncidentEventPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref CollectorFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ConfigIncidentEventRule.Arn
+
+  GuardDutyIncidentEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "incident-guardduty-detection-${Environment}"
+      Description: Routes relevant GuardDuty findings to the collector
+      EventPattern:
+        source: [aws.guardduty]
+        detail-type: ["GuardDuty Finding"]
+      Targets:
+        - Arn: !GetAtt CollectorFunction.Arn
+          Id: GuardDutyCollectorTarget
+
+  GuardDutyIncidentEventPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref CollectorFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt GuardDutyIncidentEventRule.Arn
+
+  ServiceCHighLatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "incident-service-c-latency-${Environment}"
+      Namespace: AWS/Lambda
+      MetricName: Duration
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref ServiceCFunction
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 2
+      DatapointsToAlarm: 2
+      Threshold: 3000
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  ServiceCascadeCompositeAlarm:
+    Type: AWS::CloudWatch::CompositeAlarm
+    Properties:
+      AlarmName: !Sub "incident-service-cascade-${Environment}"
+      AlarmRule: !Sub 'ALARM("incident-service-a-errors-${Environment}") AND ALARM("incident-service-c-latency-${Environment}")'
+    DependsOn: [ServiceAErrorAlarm, ServiceCHighLatencyAlarm]
+
+  CascadeIncidentEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "incident-cascade-detection-${Environment}"
+      EventPattern:
+        source: [aws.cloudwatch]
+        detail-type: ["CloudWatch Alarm State Change"]
+        detail:
+          state:
+            value: [ALARM]
+          alarmName:
+            - !Sub "incident-service-cascade-${Environment}"
+      Targets:
+        - Arn: !GetAtt CollectorFunction.Arn
+          Id: CascadeCollectorTarget
+
+  CascadeIncidentEventPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref CollectorFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt CascadeIncidentEventRule.Arn
+
+  IncidentDataLakeConfigPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref IncidentDataLake
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AWSConfigBucketPermissionsCheck
+            Effect: Allow
+            Principal:
+              Service: config.amazonaws.com
+            Action: s3:GetBucketAcl
+            Resource: !GetAtt IncidentDataLake.Arn
+          - Sid: AWSConfigBucketDelivery
+            Effect: Allow
+            Principal:
+              Service: config.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub "${IncidentDataLake.Arn}/AWSLogs/${AWS::AccountId}/Config/*"
+            Condition:
+              StringEquals:
+                s3:x-amz-acl: bucket-owner-full-control
 
 Outputs:
   IncidentDataLakeName:
