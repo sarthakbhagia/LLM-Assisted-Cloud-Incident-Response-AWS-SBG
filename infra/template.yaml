@@ -10,6 +10,7 @@ Globals:
     Timeout: 60
     MemorySize: 256
     Architectures: [arm64]
+    Tracing: Active
 
 Parameters:
   Environment:
@@ -156,6 +157,16 @@ Resources:
                   - bedrock:Retrieve
                   - bedrock:RetrieveAndGenerate
                 Resource: '*'
+        - PolicyName: invoke-diagnosis-lambda
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                # Use a pattern-based ARN to avoid a circular dependency with DiagnosisFunction.
+                # The SAM naming convention produces: <stack>-DiagnosisFunction-<suffix>
+                Resource: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:*DiagnosisFunction*"
 
   # ---------------------------------------------------------------------------
   # IAM role: remediation Lambda.
@@ -248,6 +259,16 @@ Resources:
             Action: sts:AssumeRole
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: xray-write
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - xray:PutTraceSegments
+                  - xray:PutTelemetryRecords
+                Resource: '*'
 
   # ---------------------------------------------------------------------------
   # Service C
@@ -359,7 +380,27 @@ Resources:
       CodeUri: ../src/collector/
       Handler: app.lambda_handler
       Role: !GetAtt CollectorDiagnosisRole.Arn
-      Description: Receives incident detection events from EventBridge
+      Description: Receives incident detection events, collects observability evidence, writes to S3+DynamoDB, invokes diagnosis
+      Timeout: 300
+      MemorySize: 512
+      Environment:
+        Variables:
+          INCIDENTS_TABLE: !Ref IncidentsTable
+          DATA_LAKE_BUCKET: !Ref IncidentDataLake
+          DIAGNOSIS_FUNCTION_NAME: !Ref DiagnosisFunction
+
+  DiagnosisFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../src/diagnosis/
+      Handler: app.lambda_handler
+      Role: !GetAtt CollectorDiagnosisRole.Arn
+      Description: "[STUB — Phase 4] Receives incident evidence, calls Bedrock for LLM diagnosis"
+      Timeout: 120
+      Environment:
+        Variables:
+          INCIDENTS_TABLE: !Ref IncidentsTable
+          DATA_LAKE_BUCKET: !Ref IncidentDataLake
 
   # ---------------------------------------------------------------------------
   # PHASE 2 - EventBridge routing for CloudWatch alarms
@@ -631,6 +672,14 @@ Outputs:
   DemoAppRoleArn:
     Description: ARN of the Phase 1 demo application role
     Value: !GetAtt DemoAppRole.Arn
+
+  CollectorFunctionArn:
+    Description: ARN of the Phase 3 collector Lambda
+    Value: !GetAtt CollectorFunction.Arn
+
+  DiagnosisFunctionArn:
+    Description: ARN of the Phase 4 diagnosis Lambda (stub until Phase 4)
+    Value: !GetAtt DiagnosisFunction.Arn
 
   ServiceAUrl:
     Description: Phase 1 entry point
