@@ -157,16 +157,17 @@ Resources:
                   - bedrock:Retrieve
                   - bedrock:RetrieveAndGenerate
                 Resource: '*'
-        - PolicyName: invoke-diagnosis-lambda
+        - PolicyName: invoke-downstream-lambdas
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
               - Effect: Allow
                 Action:
                   - lambda:InvokeFunction
-                # Use a pattern-based ARN to avoid a circular dependency with DiagnosisFunction.
-                # The SAM naming convention produces: <stack>-DiagnosisFunction-<suffix>
-                Resource: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:*DiagnosisFunction*"
+                Resource:
+                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:*DiagnosisFunction*"
+                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:*NotifyFunction*"
+
 
   # ---------------------------------------------------------------------------
   # IAM role: remediation Lambda.
@@ -395,12 +396,15 @@ Resources:
       CodeUri: ../src/diagnosis/
       Handler: app.lambda_handler
       Role: !GetAtt CollectorDiagnosisRole.Arn
-      Description: "[STUB — Phase 4] Receives incident evidence, calls Bedrock for LLM diagnosis"
+      Description: Receives incident evidence, loads runbook context, calls Bedrock for LLM diagnosis
       Timeout: 120
+      MemorySize: 512
       Environment:
         Variables:
           INCIDENTS_TABLE: !Ref IncidentsTable
           DATA_LAKE_BUCKET: !Ref IncidentDataLake
+          BEDROCK_MODEL_ID: "us.anthropic.claude-3-5-sonnet-20241022-v2:0"
+          NOTIFY_FUNCTION_NAME: ""
 
   # ---------------------------------------------------------------------------
   # PHASE 2 - EventBridge routing for CloudWatch alarms
