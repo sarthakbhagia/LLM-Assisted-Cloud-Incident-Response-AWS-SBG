@@ -81,6 +81,16 @@ Build the full pipeline for all three of these. Do not expand scope beyond these
   run_evaluation.py          # runs fault injection N times, logs results
   metrics.py                  # computes MTTR, RCA accuracy, hallucination rate
   results/                    # output CSVs/JSON for the paper
+/dashboard
+  /api
+    dashboard_api_lambda.py    # GET /incidents, GET /incidents/{id}, GET /results — read-only, no write paths
+  /web
+    src/
+      IncidentFeed.jsx          # live-polling list of incidents with state badges
+      IncidentDetail.jsx        # raw data, reasoning_trace, diagnosis, verification side-by-side
+      MetricsPanel.jsx          # MTTR / RCA accuracy / hallucination rate / diagnosis-recovery gap charts
+      ReplayMode.jsx             # steps through a saved past incident at demo speed
+    package.json
 /docs
   architecture.md
   data_schema.md
@@ -217,6 +227,28 @@ README.md
     - Add a flag to rerun a subset of evaluation with `used_rag=false` (skip runbook context injection) to compare context-injection vs no-context accuracy/hallucination/verification outcomes
 27. Output all results to `/evaluation/results/` as CSV + summary JSON, ready to turn into paper graphs (include a dedicated `failure_taxonomy.csv` and `diagnosis_recovery_gap.csv`)
 
+### Phase 8: Presentation dashboard (read-only visualization layer)
+
+**Why this phase exists:** every prior phase produces state changes visible only in DynamoDB/CloudWatch/S3. There is currently nothing to show a live audience. This phase adds a thin, strictly read-only visualization layer on top of the existing pipeline — it must not introduce any new write paths, remediation logic, or business logic. If it's not on screen, it doesn't belong in this phase.
+
+28. Implement `dashboard_api_lambda.py` behind a new API Gateway route (reuse the existing HTTP API from Phase 5's `approval_handler` if simpler, just add routes, don't stand up a second API Gateway):
+    - `GET /incidents` — returns recent `IncidentRecord` items from DynamoDB, newest first, paginated
+    - `GET /incidents/{incident_id}` — returns the full record, plus fetches `raw_data.json` from S3 for that incident so the detail view can show original observability data alongside the diagnosis
+    - `GET /results` — returns the latest summary JSON from `/evaluation/results/` (MTTR, RCA accuracy, hallucination rate, diagnosis-recovery gap, failure mode distribution)
+    - IAM role for this Lambda: read-only on the `incidents` table and the incident-data S3 bucket. No remediation, no approval, no write permissions of any kind — this is a hard guardrail, not a suggestion (see Guardrails section below)
+29. Build `/dashboard/web` as a minimal React app (Vite, no backend framework needed — it only talks to the API above):
+    - `IncidentFeed.jsx`: polls `GET /incidents` every few seconds, renders each incident as a card that visually reflects its current pipeline stage (`detected` → `diagnosing` → `pending_approval` → `approved` → `executed` → `resolved` / `not_resolved`). This is the main "watch it happen live" view for a demo.
+    - `IncidentDetail.jsx`: click into a card to see the raw collected data, the full `diagnosis` block (including `reasoning_trace`), the `remediation` block, and the `verification` block side by side — specifically laid out so a viewer can visually compare `diagnosis.confidence` against `verification.status` in one glance, since that comparison is the paper's headline result
+    - `MetricsPanel.jsx`: renders the Phase 7 evaluation results (`results/*.json`/CSV) as charts — MTTR distribution, RCA accuracy, hallucination rate, and the two novelty metrics (diagnosis-recovery gap, failure-mode taxonomy breakdown)
+    - `ReplayMode.jsx`: lets you pick a past incident_id from an evaluation run and step through its state transitions at a controlled pace (e.g., 1 stage every 3 seconds), so the demo doesn't depend on a live fault injection completing cleanly in front of an audience
+30. Deploy the React build as a static site (S3 + CloudFront, or just `npm run build` + local `vite preview` for the actual presentation if you don't want to manage another CloudFront distribution) — add this to `template.yaml` only if you want it reproducible via SAM; a manually-hosted static build is acceptable here since it's a demo surface, not part of the evaluated pipeline
+31. Confirm end-to-end: trigger a fault injection script from Phase 7, watch the incident card move through every state on the dashboard in real time, then open the detail view and confirm `reasoning_trace`, `diagnosis`, and `verification` all render correctly
+
+**Optional stretch additions** (do these only if time allows after 28–31 are solid — do not let them delay the core dashboard):
+- Confidence-calibration chart in `MetricsPanel.jsx`: plot `diagnosis.confidence` vs actual correctness across all injected runs
+- Hallucination highlighting in `IncidentDetail.jsx`: highlight the specific sentence(s) in `reasoning_trace` that reference a resource/metric absent from `raw_data.json`
+- A small `used_rag=true` vs `used_rag=false` toggle/filter on `MetricsPanel.jsx` to visually contrast the RAG-ablation results already computed in Phase 7
+
 ---
 
 ## Guardrails / Non-negotiables
@@ -228,6 +260,7 @@ README.md
 - Keep prompts and runbooks in version control as plain files (`prompts.py`, `/knowledge_base/*.md`) so changes are diffable for the paper's methodology section
 - Do NOT skip the Phase 6.5 verification step or the failure-mode logging to save time — these are the paper's actual novel contribution, not optional polish. A working demo without these is a class project; with these, it's a publishable result.
 - Do NOT provision Bedrock Knowledge Bases / OpenSearch Serverless anywhere in this project, including via the console's "quick create" option — it auto-provisions an OpenSearch Serverless collection with a real cost floor even when idle, and deleting the Knowledge Base does not delete the underlying collection
+- The Phase 8 dashboard Lambda/IAM role must be strictly read-only (DynamoDB `GetItem`/`Query` and S3 `GetObject` only) — it must never be granted permissions that could approve, remediate, or otherwise mutate incident state. The dashboard visualizes the pipeline; it is never part of it.
 
 ---
 
@@ -243,5 +276,6 @@ If feeding this to an AI IDE one phase at a time, do it in this order and confir
 6. Phase 6 (remediation) → confirm an approved incident actually executes the fix
 7. Phase 6.5 (verification) → confirm the system re-checks the original signal post-remediation and correctly logs resolved/not_resolved
 8. Phase 7 (evaluation) → run the full harness including the RAG-ablation and failure-mode review pass, generate results for the paper
+9. Phase 8 (presentation dashboard) → confirm the incident feed reflects live pipeline state end-to-end, and that the metrics panel correctly renders Phase 7's evaluation output; this phase can start as soon as Phase 3 is stable (the incident feed only needs `detected` records to exist) and doesn't need to wait for Phase 7, but the metrics/replay views do need Phase 7's results
 
-Each phase should be a separate PR/commit so the team's workstreams can build in parallel once Phase 0-3 are stable and merged.
+Each phase should be a separate PR/commit so the team's workstreams can build in parallel once Phase 0-3 are stable and merged. Phase 8 can be built in parallel with Phases 4-7 by a separate team member once Phase 3 is merged, since it only depends on `IncidentRecord` existing in DynamoDB, not on any later phase's logic.
