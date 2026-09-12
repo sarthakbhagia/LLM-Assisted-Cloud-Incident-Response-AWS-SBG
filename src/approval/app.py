@@ -9,19 +9,24 @@ Lambda (Phase 6 — gracefully skipped until it exists).
 Design notes:
 - Route: GET /approval (link-style, spec's "button-style link" path) and
   POST /approval (JSON body — works for future Slack slash commands/buttons).
-- Auth: HMAC-SHA256 token over the incident_id, keyed by an SSM SecureString
+- Auth: HMAC-SHA256 token over `incident_id:action`, keyed by an SSM SecureString
   secret. The token is embedded in the Slack links by the notify Lambda, so
-  the URL is unguessable and action-independent. Not a replacement for full
-  Slack signature verification — documented trade-off in the spec's
-  "simplest path" spirit.
+  the URL is unguessable and action-bound: an approve link cannot be reused
+  as a reject link (and vice-versa). Not a replacement for full Slack
+  signature verification — documented trade-off in the spec's "simplest path"
+  spirit.
 - Idempotency / race safety: the status flip is a conditional DynamoDB update
   (ConditionExpression on remediation.status = pending_approval), so a double
   click or concurrent approve/reject cannot double-apply. This conditional
   `approved` write is also the guardrail gate required before any remediation
   executes (spec Guardrails: "No remediation executes without a status change
   to `approved` in DynamoDB first").
-- Response bodies are intentionally human-readable: this endpoint is clicked
-  from Slack in a browser.
+- Response bodies:
+  - GET (link flow from Slack): human-readable HTML so a browser user sees a clear
+    approve/reject confirmation page.
+  - POST / JSON: JSON response shape (machine-friendly) for future Slack slash
+    commands, interactive payloads, and any Phase 7/8 consumer that hits the
+    endpoint programmatically.
 """
 
 from __future__ import annotations
@@ -72,12 +77,12 @@ def lambda_handler(event, context):
 
     if not INCIDENTS_TABLE:
         logger.error("INCIDENTS_TABLE not configured")
-        return _html_response(500, "Server configuration error: incidents table not set.")
+        return _response(500, {"error": "Server configuration error: incidents table not set."})
 
     # 1. Verify the HMAC token (when the secret is configured)
-    if not _token_valid(incident_id, params.get("token")):
-        logger.warning(json.dumps({"event": "approval_rejected_bad_token", "incident_id": incident_id}))
-        return _html_response(403, "Invalid or missing approval token. Use the link from the Slack incident message.")
+    if not _token_valid(incident_id, action, params.get("token")):
+        logger.warning(json.dumps({"event": "approval_rejected_bad_token", "incident_id": incident_id, "action": action}))
+        return _response(403, {"error": "Invalid or missing approval token. Use the link from the Slack incident message."})
 
     # 2. Flip remediation.status — conditionally, so only the first caller wins
     new_status = "approved" if action == "approve" else "rejected"
@@ -85,12 +90,12 @@ def lambda_handler(event, context):
 
     if updated == "conditional_failed":
         current = _get_current_status(incident_id)
-        return _html_response(
+        return _response(
             409,
-            f"Incident {incident_id} was already processed (current status: {current}). No change made.",
+            {"error": f"Incident {incident_id} was already processed (current status: {current}). No change made."},
         )
     if updated is None:
-        return _html_response(500, f"Failed to update incident {incident_id} — check Lambda logs.")
+        return _response(500, {"error": f"Failed to update incident {incident_id} — check Lambda logs."})
 
     # 3. If approved, kick off remediation (Phase 6; no-op until it exists)
     remediation_invoked = False
@@ -109,8 +114,17 @@ def lambda_handler(event, context):
         detail = "Remediation has been triggered." if remediation_invoked else (
             "Remediation Lambda is not wired up yet (Phase 6) — incident is marked approved."
         )
-        return _html_response(200, f":white_check_mark: Incident {incident_id} <b>approved</b>. {detail}")
-    return _html_response(200, f":no_entry: Incident {incident_id} <b>rejected</b>. The incident record has been updated.")
+        return _response(200, {
+            "status": "approved",
+            "incident_id": incident_id,
+            "remediation_invoked": remediation_invoked,
+            "detail": detail,
+        })
+    return _response(200, {
+        "status": "rejected",
+        "incident_id": incident_id,
+        "detail": "The incident record has been updated.",
+    })
 
 
 # ===========================================================================
@@ -153,10 +167,12 @@ def _parse_request(event: dict) -> tuple[dict | None, dict | None]:
     action = (params.get("action") or "").strip().lower()
     token = (params.get("token") or "").strip()
 
+    if not incident_id:
+        return None, _response(400, {"error": "Missing incident_id."})
     if not re.fullmatch(r"[0-9a-fA-F-]{16,64}", incident_id):
-        return None, _html_response(400, "Missing or malformed incident_id.")
+        return None, _response(400, {"error": "Malformed incident_id."})
     if action not in VALID_ACTIONS:
-        return None, _html_response(400, f"Invalid action '{action}'. Must be one of: approve, reject.")
+        return None, _response(400, {"error": f"Invalid action '{action}'. Must be one of: approve, reject."})
 
     return {"incident_id": incident_id, "action": action, "token": token}, None
 
@@ -165,8 +181,12 @@ def _parse_request(event: dict) -> tuple[dict | None, dict | None]:
 # Token verification
 # ===========================================================================
 
-def _token_valid(incident_id: str, token: str | None) -> bool:
-    """HMAC-SHA256(incident_id) check. Returns False on any mismatch/failure."""
+def _token_valid(incident_id: str, action: str, token: str | None) -> bool:
+    """HMAC-SHA256(incident_id:action) check. Returns False on any mismatch/failure.
+
+    The token is bound to both the incident_id and the action, matching the
+    notify Lambda's link builder: token = HMAC-SHA256(secret, f"{incident_id}:{action}").hexdigest()
+    """
     secret = _get_approval_secret()
     if not secret:
         # No secret configured: fail closed for security, log loudly.
@@ -177,7 +197,8 @@ def _token_valid(incident_id: str, token: str | None) -> bool:
         return False
     if not token:
         return False
-    expected = hmac.new(secret.encode("utf-8"), incident_id.encode("utf-8"), hashlib.sha256).hexdigest()
+    signed = f"{incident_id}:{action}"
+    expected = hmac.new(secret.encode("utf-8"), signed.encode("utf-8"), hashlib.sha256).hexdigest()
     return hmac.compare_digest(expected, token.lower())
 
 
@@ -300,4 +321,13 @@ def _html_response(status_code: int, message: str) -> dict:
         "statusCode": status_code,
         "headers": {"Content-Type": "text/html; charset=utf-8"},
         "body": html,
+    }
+
+
+def _response(status_code: int, body_obj: dict) -> dict:
+    """JSON response — used for POST bodies and any machine consumer."""
+    return {
+        "statusCode": status_code,
+        "headers": {"Content-Type": "application/json"},
+        "body": json.dumps(body_obj),
     }

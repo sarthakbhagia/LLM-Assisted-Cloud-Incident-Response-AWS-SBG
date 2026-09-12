@@ -30,12 +30,21 @@ INC = "11111111-2222-3333-4444-555555555555"
 REMEDIATION_FN = "llm-incident-response-RemediationFunction-ABC123"
 
 
+def signed(incident_id=INC, action="approve", secret=SECRET):
+    """Token the notify Lambda would embed in an approval link."""
+    return hmac.new(secret.encode("utf-8"), f"{incident_id}:{action}".encode("utf-8"), sha256).hexdigest()
+
+
 def make_token(incident_id=INC, secret=SECRET):
-    return hmac.new(secret.encode("utf-8"), incident_id.encode("utf-8"), sha256).hexdigest()
+    return signed(incident_id, secret=secret)
 
 
 def api_event(action="approve", token=None, incident_id=INC, method="GET", body=None):
-    """Build an API Gateway REST (v1) proxy event for GET or POST."""
+    """Build an API Gateway REST (v1) proxy event for GET or POST.
+
+    When token is omitted, one is computed with :func:`signed` so it matches
+    what the notify Lambda would embed in an approval link.
+    """
     event = {
         "httpMethod": method,
         "path": "/approval",
@@ -47,13 +56,13 @@ def api_event(action="approve", token=None, incident_id=INC, method="GET", body=
         event["queryStringParameters"] = {
             "incident_id": incident_id,
             "action": action,
-            "token": token if token is not None else make_token(incident_id),
+            "token": token if token is not None else signed(incident_id, action),
         }
     else:
         event["queryStringParameters"] = {}
         event["headers"] = {"Content-Type": "application/json"}
         event["body"] = body if body is not None else json.dumps(
-            {"incident_id": incident_id, "action": action, "token": make_token(incident_id)}
+            {"incident_id": incident_id, "action": action, "token": signed(incident_id, action)}
         )
     return event
 
@@ -353,6 +362,50 @@ class ApprovalHandlerCase(Fixture):
         resp = self.mod.lambda_handler(api_event("approve"), None)
 
         self.assertEqual(resp["statusCode"], 500)
+
+    def test_secret_rotation_rejects_link(self):
+        """If the SSM secret is rotated between link generation and approval,
+        the token no longer verifies and the request is rejected (403)."""
+        self._set_table(FakeTable({INC: pending_item()}))
+        self._set_lambda(FakeLambda())
+        self.mod.REMEDIATION_FUNCTION_NAME = REMEDIATION_FN
+
+        # Start with secret A; build a link token signed with it (what notify
+        # would have embedded).
+        self._set_ssm({"/llm-incident-response/approval-token-secret": SECRET})
+        old_token = signed(INC, action="approve", secret=SECRET)
+
+        # Rotating the secret to B makes old_token unverifiable.
+        self._set_ssm({"/llm-incident-response/approval-token-secret": "rotated-secret"})
+        self.mod._cache.clear()
+
+        resp = self.mod.lambda_handler(
+            api_event("approve", token=old_token, incident_id=INC), None
+        )
+
+        self.assertEqual(resp["statusCode"], 403)
+        # State must not change on a rejected token.
+        self.assertEqual(
+            self.table.items[INC]["remediation"]["status"], "pending_approval"
+        )
+        self.assertEqual(self.lamb.calls, [])
+
+    def test_wrong_action_token_rejected(self):
+        """An approve link's token is bound to the approve action; using it
+        against a reject request must be rejected (403)."""
+        self._set_table(FakeTable({INC: pending_item()}))
+        self._set_ssm({"/llm-incident-response/approval-token-secret": SECRET})
+
+        # Token signed for 'approve'.
+        approve_token = signed(INC, action="approve")
+        resp = self.mod.lambda_handler(
+            api_event("reject", token=approve_token, incident_id=INC), None
+        )
+
+        self.assertEqual(resp["statusCode"], 403)
+        self.assertEqual(
+            self.table.items[INC]["remediation"]["status"], "pending_approval"
+        )
 
 
 if __name__ == "__main__":

@@ -191,14 +191,24 @@ class NotifyHandlerCase(Fixture):
         urls = re.findall(r"<(https://[^|>]+)\|", section_texts[0])
         self.assertEqual(len(urls), 2)
 
-        expected_token = hmac.new(
-            SECRET.encode("utf-8"), INC.encode("utf-8"), hashlib.sha256
+        # The link token is now bound to incident_id:action, not just incident_id.
+        approve_token = hmac.new(
+            SECRET.encode("utf-8"), f"{INC}:approve".encode("utf-8"), hashlib.sha256
+        ).hexdigest()
+        reject_token = hmac.new(
+            SECRET.encode("utf-8"), f"{INC}:reject".encode("utf-8"), hashlib.sha256
         ).hexdigest()
         approve = [u for u in urls if "action=approve" in u]
         reject = [u for u in urls if "action=reject" in u]
         self.assertEqual(len(approve), 1)
         self.assertEqual(len(reject), 1)
-        self.assertIn("token=" + expected_token, approve[0])
+        self.assertIn("token=" + approve_token, approve[0])
+        self.assertIn("token=" + reject_token, reject[0])
+        # Cross-check: the approve token must NOT verify for a reject action.
+        reject_check = hmac.new(
+            SECRET.encode("utf-8"), f"{INC}:reject".encode("utf-8"), hashlib.sha256
+        ).hexdigest()
+        self.assertNotEqual(approve_token, reject_check)
 
     def test_approval_links_omitted_without_base_url(self):
         self._wire(incident_items={INC: self.incident_item()})
@@ -260,6 +270,10 @@ class NotifyHandlerCase(Fixture):
             resp = self.mod.lambda_handler(notify_event(), None)
 
         self.assertEqual(resp["statusCode"], 200)
+        payload = json.loads(urlopen.call_args[0][0].data.decode("utf-8"))
+        rendered = json.dumps(payload)
+        self.assertIn("Evidence unavailable", rendered)
+        self.assertIn("check Lambda logs", rendered)
 
     # -- detection context -------------------------------------------------------------
 

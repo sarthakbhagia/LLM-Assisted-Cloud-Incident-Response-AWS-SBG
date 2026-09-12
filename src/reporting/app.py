@@ -168,13 +168,19 @@ def _confidence_display(confidence) -> str:
 
 
 def _approval_url(incident_id: str, action: str) -> str | None:
-    """Build a signed approve/reject link; None when config is incomplete."""
+    """Build a signed approve/reject link; None when config is incomplete.
+
+    The token is bound to both the incident_id and the action, so an approve
+    link cannot be reused as a reject link (and vice-versa). Syntax:
+        token = HMAC-SHA256(secret, f"{incident_id}:{action}").hexdigest()
+    """
     if not APPROVAL_API_BASE:
         return None
     secret = _get_approval_secret()
     if not secret:
         return None
-    token = hmac.new(secret.encode("utf-8"), incident_id.encode("utf-8"), hashlib.sha256).hexdigest()
+    signed = f"{incident_id}:{action}"
+    token = hmac.new(secret.encode("utf-8"), signed.encode("utf-8"), hashlib.sha256).hexdigest()
     query = urllib.parse.urlencode({"incident_id": incident_id, "action": action, "token": token})
     return f"{APPROVAL_API_BASE}?{query}"
 
@@ -250,6 +256,21 @@ def _build_slack_message(incident_id: str, diagnosis: dict, incident: dict, dete
         f"{_slack_escape(root_cause)} "
         f"(confidence {confidence}, suggested action: {_slack_escape(suggested_action)})"
     )
+    # When enrichment (incident record + raw_data.json) is unavailable the
+    # message still posts — we never let a downstream outage break the
+    # pipeline — but we flag it explicitly so the channel operator can tell
+    # "LLM had no explanation" apart from "our reporting layer couldn't load
+    # the record".
+    enrichment_ok = bool(incident.get("incident_id") and detection.get("source"))
+    if not enrichment_ok:
+        blocks.append({
+            "type": "context",
+            "elements": [{"type": "mrkdwn", "text": (
+                ":warning: Evidence unavailable — incident record or raw_data.json "
+                "could not be loaded (check Lambda logs). Posting with payload fields only."
+            )}],
+        })
+
     return {"text": _clip(text_fallback, 300), "blocks": blocks}
 
 
