@@ -654,6 +654,46 @@ Resources:
       Principal: events.amazonaws.com
       SourceArn: !GetAtt CascadeIncidentEventRule.Arn
 
+  # ===========================================================================
+  # PHASE 6 - REMEDIATION
+  # Executes the approved action and triggers closed-loop verification.
+  # ===========================================================================
+
+  RemediationFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../src/remediation/
+      Handler: app.lambda_handler
+      Role: !GetAtt RemediationRole.Arn
+      Description: Executes the approved remediation action then async-invokes the verification Lambda
+      Timeout: 300
+      MemorySize: 256
+      Environment:
+        Variables:
+          INCIDENTS_TABLE: !Ref IncidentsTable
+          DATA_LAKE_BUCKET: !Ref IncidentDataLake
+          VERIFICATION_FUNCTION_NAME: !Ref VerificationFunction
+
+  # ===========================================================================
+  # PHASE 6.5 - CLOSED-LOOP VERIFICATION (core research novelty)
+  # Waits 2 min post-remediation, re-checks the original detection signal,
+  # writes resolved/not_resolved/inconclusive to IncidentRecord.verification.
+  # ===========================================================================
+
+  VerificationFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../src/verification/
+      Handler: app.lambda_handler
+      Role: !GetAtt RemediationRole.Arn
+      Description: Re-checks the original incident signal post-remediation and writes verification outcome to DynamoDB
+      Timeout: 600
+      MemorySize: 256
+      Environment:
+        Variables:
+          INCIDENTS_TABLE: !Ref IncidentsTable
+          DATA_LAKE_BUCKET: !Ref IncidentDataLake
+
   IncidentDataLakeConfigPolicy:
     Type: AWS::S3::BucketPolicy
     Properties:
@@ -710,7 +750,7 @@ Resources:
         Variables:
           INCIDENTS_TABLE: !Ref IncidentsTable
           APPROVAL_TOKEN_SECRET_SSM: !Ref ApprovalTokenSecretSsm
-          REMEDIATION_FUNCTION_NAME: "" # Phase 6: set to !Ref RemediationFunction
+          REMEDIATION_FUNCTION_NAME: !Ref RemediationFunction
       Events:
         ApprovalGet:
           Type: Api
@@ -825,6 +865,14 @@ Outputs:
   ApprovalFunctionArn:
     Description: ARN of the Phase 5 approval endpoint Lambda
     Value: !GetAtt ApprovalFunction.Arn
+
+  RemediationFunctionArn:
+    Description: ARN of the Phase 6 remediation Lambda
+    Value: !GetAtt RemediationFunction.Arn
+
+  VerificationFunctionArn:
+    Description: ARN of the Phase 6.5 verification Lambda
+    Value: !GetAtt VerificationFunction.Arn
 
   ApprovalUrl:
     Description: Phase 5 approval endpoint (append ?incident_id=...&action=approve&token=...)
