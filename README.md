@@ -15,10 +15,9 @@ When something breaks on a cloud application (a server runs out of memory, a
 security setting is wrong, one service takes another down with it), this
 system is supposed to **notice the problem automatically**, **figure out why it
 happened**, **suggest a fix**, and — only with a human's permission — **apply
-the fix**.
+the fix**, followed by **closed-loop verification** to confirm the fix actually worked.
 
-The "figuring out why" part is done by an AI model (a large language model,
-same family of technology as ChatGPT), pointed at real data about the failure
+The "figuring out why" part is done by an AI model (a large language model via Amazon Bedrock), pointed at real data about the failure
 instead of being asked to guess.
 
 Everything it does is written down in a database as a **structured record**, so
@@ -30,8 +29,7 @@ building this for an academic paper.
 
 ## How it works (the flow)
 
-Here's the whole pipeline, from "something broke" to "we fixed it and logged
-everything."
+Here's the whole pipeline, from "something broke" to "we fixed it and verified everything."
 
 ```mermaid
 flowchart TD
@@ -50,10 +48,12 @@ flowchart TD
     K -- No --> F3[Record marked rejected<br/>DynamoDB]
     K -- Yes --> L[Applies the fix<br/>remediation_lambda]
     L --> F4[Record marked executed or failed<br/>DynamoDB]
+    F4 --> M[Re-checks original signal<br/>verification_lambda]
+    M --> F5[Verification logged: resolved / not_resolved<br/>DynamoDB]
 ```
 
 The simple version: **detect → collect evidence → diagnose with AI → notify a
-human → get approval → fix it → log everything.**
+human → get approval → fix it → verify resolution → log everything.**
 
 ---
 
@@ -65,7 +65,7 @@ think of it as renting computers and utilities instead of buying your own.
 | Service | What it does in this project | Why we're using it |
 |---|---|---|
 | **AWS SAM** | A tool that describes our entire backend in one config file (`template.yaml`) and deploys it with one command. | So the whole system is reproducible from code — no clicking around in the AWS website. |
-| **Lambda** | Amazon's service for running small bits of code without managing a server — you just upload a function and it runs when triggered. | All our backend logic (collect, diagnose, remediate, etc.) is a Lambda function — cheap and easy to trigger. |
+| **Lambda** | Amazon's service for running small bits of code without managing a server — you just upload a function and it runs when triggered. | All our backend logic (collect, diagnose, remediate, verify) is a Lambda function — cheap and easy to trigger. |
 | **S3** | Amazon's file storage ("buckets" = folders in the cloud). | We store raw incident evidence in a "data lake" bucket, and our runbook docs in another. |
 | **DynamoDB** | Amazon's NoSQL database — fast key-value storage. | Every incident becomes a structured record here; this is our evaluation dataset. |
 | **EventBridge** | A message router that reacts to "events" (like "an alarm fired") and triggers something. | Takes detection signals and sends them to our collector Lambda. |
@@ -86,25 +86,43 @@ think of it as renting computers and utilities instead of buying your own.
 ```
 LLM-Assisted-Cloud-Incident-Response-AWS-SBG/
 ├── infra/
-│   ├── template.yaml              # SAM template: every AWS resource defined here
-│   └── samconfig.toml             # deployment defaults
+│   ├── template.yaml              # SAM template: all AWS resources (Lambdas, DynamoDB, S3, Alarms, Config)
+│   └── samconfig.toml             # SAM deployment defaults
 ├── src/
-│   ├── service_a/app.py           # /start, calls Service B
-│   ├── service_b/app.py           # /service-b, calls Service C
-│   ├── service_c/app.py           # /service-c
-│   ├── detectors/                 # detection config (Phase 2)
-│   ├── collector/                 # gathers evidence on trigger (collector_lambda)
-│   ├── diagnosis/                 # Bedrock call + prompts (diagnosis_lambda)
-│   ├── remediation/               # executes the approved fix (remediation_lambda)
-│   ├── reporting/                 # sends the Slack report (notify_lambda)
-│   └── approval/                  # handles approve/reject (approval_handler)
-├── knowledge_base/                # the 3 runbook markdown files the AI learns from
-├── fault_injection/               # scripts that deliberately break the demo app
-├── evaluation/                    # runs experiments + computes metrics, results here
-├── docs/
-│   ├── architecture.md            # deep dive on the design
-│   └── data_schema.md             # the exact shape of our structured data
-└── README.md                      # you are here
+│   ├── service_a/app.py           # Phase 1: Entry point /start, calls Service B
+│   ├── service_b/app.py           # Phase 1: /service-b, calls Service C
+│   ├── service_c/app.py           # Phase 1: /service-c
+│   ├── collector/app.py           # Phase 3: Gathers telemetry evidence (collector_lambda)
+│   ├── diagnosis/                 # Phase 4: Bedrock LLM diagnosis + prompt templates + runbook loader
+│   │   ├── app.py
+│   │   ├── prompts.py
+│   │   └── runbook_loader.py
+│   ├── reporting/app.py           # Phase 5: Formats diagnosis into Slack messages (notify_lambda)
+│   ├── approval/app.py            # Phase 5: Approve/Reject API handler (approval_handler)
+│   ├── remediation/               # Phase 6: Executes approved fix (remediation_lambda + actions)
+│   │   ├── app.py
+│   │   └── actions.py
+│   └── verification/app.py        # Phase 6.5: Closed-loop verification post-remediation
+├── knowledge_base/                # Runbook procedural markdown files for context injection
+│   ├── resource_exhaustion.md
+│   ├── misconfiguration.md
+│   └── service_cascade.md
+├── events/                        # Sample EventBridge & Lambda test payloads
+│   ├── test-detection.json
+│   ├── test-notify.json
+│   └── test-approval.json
+├── tests/                         # Comprehensive unit test suite (47 tests across all phases)
+│   ├── helpers.py                 # Shared test scaffolding with boto3 stubs
+│   ├── test_demo_app.py           # Phase 1 unit tests
+│   ├── test_collector.py          # Phase 3 unit tests
+│   ├── test_diagnosis.py          # Phase 4 unit tests
+│   ├── test_notify.py             # Phase 5 notify unit tests
+│   ├── test_approval.py           # Phase 5 approval unit tests
+│   ├── test_remediation.py        # Phase 6 remediation unit tests
+│   └── test_verification.py       # Phase 6.5 verification unit tests
+├── iam_permissions_required.md    # IAM permissions guide for CloudFormation deployers
+├── PROJECT_SPEC.md                # Full engineering specification & research novelty doc
+└── README.md                      # Onboarding guide & project architecture
 ```
 
 ---
@@ -141,8 +159,10 @@ moving on.
 - [x] **Phase 3 — Data collection**: `collector_lambda` writes evidence to S3 + DynamoDB.
 - [x] **Phase 4 — Knowledge base + diagnosis**: runbooks with direct context injection (no Bedrock Knowledge Bases/OpenSearch), `diagnosis_lambda` with Bedrock + JSON validation.
 - [x] **Phase 5 — Reporting + approval**: `notify_lambda` posts the diagnosis to Slack via incoming webhook with signed approval links; `approval_handler` (API Gateway `/approval`) flips `remediation.status` to approved/rejected and triggers remediation. Secrets come from SSM SecureStrings (see Phase 5 setup below).
-- [ ] **Phase 6 — Remediation**: `remediation_lambda` executes approved fixes.
+- [x] **Phase 6 — Remediation**: `remediation_lambda` executes approved fixes (`scale_up`, `restart_service`, `lock_s3_bucket`, `tighten_iam_policy`, etc.).
+- [x] **Phase 6.5 — Closed-loop verification**: `verification_lambda` re-checks the original detection signal post-remediation and logs resolution status (`resolved`, `not_resolved`, `inconclusive`) to DynamoDB.
 - [ ] **Phase 7 — Fault injection + evaluation**: break things on purpose, score the results.
+- [ ] **Phase 8 — Presentation dashboard**: read-only visualization dashboard API & React Web UI.
 
 *(Updates made to `infra/template.yaml` itself should be reflected here as we go.)*
 
@@ -185,6 +205,12 @@ You'll need a Mac/Linux machine and an AWS account with credentials.
    ```
    Use the `samconfig.toml` already in the repo if prompted, or pass
    `--stack-name llm-incident-response --region ap-south-1 --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM`.
+
+5. **Run tests**
+   Execute the automated unit test suite covering all implemented phases:
+   ```bash
+   python3 -m unittest discover -s tests
+   ```
 
 ---
 
@@ -265,14 +291,12 @@ To switch the reporting/approval flow on:
    ```bash
    python3 -m unittest discover -s tests
    ```
-   32 tests covering both Phase 5 handlers with mocked boto3: approve/reject
+   47 tests covering all handlers with mocked boto3: approve/reject
    happy paths, bad/missing token, already-processed conflicts (409),
    malformed requests, Slack/SSM/DynamoDB failure degradation, and the
    signed-approval-link construction. Runs on plain Python 3.9+.
 
-> Until Phase 6 is deployed, approving an incident marks it `approved` in
-> DynamoDB but no fix executes — the approval handler skips the remediation
-> invocation and says so on the confirmation page.
+---
 
 ## Team workstreams
 
@@ -281,9 +305,9 @@ what's yours.
 
 | Workstream | What you own | Where to look |
 |---|---|---|
-| **Detection & data pipeline** | Alarms/rules that detect problems + the collector that gathers evidence | `src/detectors/`, `src/collector/` |
+| **Detection & data pipeline** | Alarms/rules that detect problems + the collector that gathers evidence | `infra/template.yaml`, `src/collector/` |
 | **LLM reasoning core** | Prompts, diagnosis logic, and the runbook knowledge the model learns from | `src/diagnosis/`, `knowledge_base/` |
-| **Remediation layer** | The safe, scoped actions that actually fix things | `src/remediation/` |
+| **Remediation & verification** | Scoped actions that fix issues & post-fix signal verification | `src/remediation/`, `src/verification/` |
 | **ChatOps / interface** | Slack reporting + the approve/reject flow | `src/reporting/`, `src/approval/` |
 | **Evaluation & benchmarking** | Breaking things on purpose and scoring accuracy/speed | `fault_injection/`, `evaluation/` |
 | **Paper / docs** | Architecture writeups, methodology, data schema docs | `docs/`, `README.md` |
