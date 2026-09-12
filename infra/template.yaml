@@ -29,6 +29,31 @@ Parameters:
     Default: "http://placeholder-service-c"
     Description: HTTP endpoint used by Service B to call Service C.
 
+  SlackWebhookUrlSsm:
+    Type: String
+    Default: "/llm-incident-response/slack-webhook-url"
+    Description: >
+      Name of the SSM SecureString parameter holding the Slack incoming
+      webhook URL (Phase 5). If the parameter does not exist, Slack posting
+      is skipped and the pipeline continues (logged as an error).
+
+  ApprovalTokenSecretSsm:
+    Type: String
+    Default: "/llm-incident-response/approval-token-secret"
+    Description: >
+      Name of the SSM SecureString parameter holding the shared HMAC secret
+      used to sign approval links (Phase 5). If the parameter does not exist,
+      no approval links are included in Slack messages and approval requests
+      are rejected (fail closed).
+
+  ApprovalApiBaseUrl:
+    Type: String
+    Default: ""
+    Description: >
+      Base URL of the approval endpoint used in Slack approval links, e.g.
+      https://<api-id>.execute-api.<region>.amazonaws.com/Prod/approval.
+      Leave empty to omit approval links from Slack messages.
+
 Resources:
 
   # ---------------------------------------------------------------------------
@@ -404,7 +429,7 @@ Resources:
           INCIDENTS_TABLE: !Ref IncidentsTable
           DATA_LAKE_BUCKET: !Ref IncidentDataLake
           BEDROCK_MODEL_ID: "us.anthropic.claude-3-5-sonnet-20241022-v2:0"
-          NOTIFY_FUNCTION_NAME: ""
+          NOTIFY_FUNCTION_NAME: !Ref NotifyFunction
 
   # ---------------------------------------------------------------------------
   # PHASE 2 - EventBridge routing for CloudWatch alarms
@@ -651,6 +676,114 @@ Resources:
             Condition:
               StringEquals:
                 s3:x-amz-acl: bucket-owner-full-control
+  # ===========================================================================
+  # PHASE 5 - REPORTING + APPROVAL
+  # Notify Lambda posts the diagnosis to Slack via incoming webhook;
+  # Approval endpoint flips remediation.status and triggers remediation.
+  # ===========================================================================
+
+  NotifyFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../src/reporting/
+      Handler: app.lambda_handler
+      Role: !GetAtt ReportingApprovalRole.Arn
+      Description: Formats the diagnosis into a Slack message and posts it via incoming webhook
+      Timeout: 30
+      Environment:
+        Variables:
+          INCIDENTS_TABLE: !Ref IncidentsTable
+          DATA_LAKE_BUCKET: !Ref IncidentDataLake
+          SLACK_WEBHOOK_URL_SSM: !Ref SlackWebhookUrlSsm
+          APPROVAL_TOKEN_SECRET_SSM: !Ref ApprovalTokenSecretSsm
+          APPROVAL_API_BASE: !Ref ApprovalApiBaseUrl
+
+  ApprovalFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../src/approval/
+      Handler: app.lambda_handler
+      Role: !GetAtt ReportingApprovalRole.Arn
+      Description: Approve/reject endpoint; updates incident status and invokes remediation when approved
+      Timeout: 30
+      Environment:
+        Variables:
+          INCIDENTS_TABLE: !Ref IncidentsTable
+          APPROVAL_TOKEN_SECRET_SSM: !Ref ApprovalTokenSecretSsm
+          REMEDIATION_FUNCTION_NAME: "" # Phase 6: set to !Ref RemediationFunction
+      Events:
+        ApprovalGet:
+          Type: Api
+          Properties:
+            Path: /approval
+            Method: get
+        ApprovalPost:
+          Type: Api
+          Properties:
+            Path: /approval
+            Method: post
+
+  # Shared role for the two Phase 5 Lambdas: read incidents + raw data,
+  # decrypt the two SSM parameters, and invoke the remediation Lambda.
+  ReportingApprovalRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "incident-reporting-approval-role-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: incident-record-read
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                Resource: !GetAtt IncidentsTable.Arn
+        - PolicyName: raw-evidence-read
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub "${IncidentDataLake.Arn}/incidents/*"
+        - PolicyName: ssm-secure-parameters
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SlackWebhookUrlSsm}"
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${ApprovalTokenSecretSsm}"
+        - PolicyName: invoke-remediation-lambda
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource:
+                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:*RemediationFunction*"
+
+  ApprovalFunctionApiPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ApprovalFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+
 # =============================================================================
 # OUTPUTS
 # =============================================================================
@@ -684,6 +817,18 @@ Outputs:
   DiagnosisFunctionArn:
     Description: ARN of the Phase 4 diagnosis Lambda (stub until Phase 4)
     Value: !GetAtt DiagnosisFunction.Arn
+
+  NotifyFunctionArn:
+    Description: ARN of the Phase 5 notify (Slack reporting) Lambda
+    Value: !GetAtt NotifyFunction.Arn
+
+  ApprovalFunctionArn:
+    Description: ARN of the Phase 5 approval endpoint Lambda
+    Value: !GetAtt ApprovalFunction.Arn
+
+  ApprovalUrl:
+    Description: Phase 5 approval endpoint (append ?incident_id=...&action=approve&token=...)
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/approval"
 
   ServiceAUrl:
     Description: Phase 1 entry point

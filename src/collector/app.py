@@ -11,6 +11,8 @@ Pipeline:
   5. Async-invoke diagnosis_lambda (Phase 4 stub for now)
 """
 
+from __future__ import annotations
+
 import json
 import logging
 import os

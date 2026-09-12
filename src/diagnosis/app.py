@@ -7,6 +7,8 @@ invokes AWS Bedrock Claude model, validates JSON diagnosis, updates DynamoDB,
 and invokes notify Lambda.
 """
 
+from __future__ import annotations
+
 import json
 import logging
 import os
