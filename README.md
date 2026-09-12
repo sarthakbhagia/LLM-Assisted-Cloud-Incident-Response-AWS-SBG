@@ -41,7 +41,7 @@ flowchart TD
     D --> E[Stores raw evidence<br/>S3 data lake]
     D --> F[Creates incident record<br/>DynamoDB]
     F --> G[Diagnoses root cause<br/>diagnosis_lambda asks Bedrock with runbook context]
-    G --> H[Retrieves runbook knowledge<br/>Bedrock Knowledge Base RAG]
+    G --> H[Injects runbook context<br/>runbook_loader.py, plain-text lookup]
     H --> G
     G --> F2[Updates record with diagnosis<br/>DynamoDB]
     F2 --> I[Notifies the team<br/>notify_lambda posts to Slack]
@@ -74,7 +74,7 @@ think of it as renting computers and utilities instead of buying your own.
 | **GuardDuty** | A security service that watches for unusual/malicious behavior. | A second detector for security-related incidents. |
 | **X-Ray** | A tracing service that shows how requests move between services. | Gives us the "who called whom" evidence for **cascade** failures. |
 | **Amazon Bedrock** | A service that lets you use AI models (like Claude) without hosting them yourself. | This is the "brain" that reads incident data and diagnoses root cause. |
-| **Bedrock Knowledge Bases** | Gives Bedrock access to your own documents via search (RAG = retrieval-augmented generation). | We feed it our runbooks so the AI fixes problems the same way a human would. |
+| **Runbook context injection** | Loads our 3 runbook files and injects the matching one into the prompt as plain text (no vector store needed for a 3-file corpus). | Lets the AI fix problems the same way a human runbook would, with zero extra AWS cost. |
 | **SNS** | Amazon's notification service — sends messages to emails, Slack, etc. | Routes our report to Slack. |
 | **Slack webhook** | A URL that lets an app post messages directly into a Slack channel. | Where humans read the diagnosis and click approve/reject. |
 | **API Gateway** | Sits in front of Lambda so it can be called from the internet via a URL. | Lets the "approve" button hit our approval handler from outside AWS. |
@@ -138,9 +138,9 @@ moving on.
 - [x] **Phase 0 — Infra bootstrap**: SAM skeleton, S3 data lake, DynamoDB table, IAM roles deployed via `sam deploy`.
 - [x] **Phase 1 — Demo app**: services A/B/C, API endpoints, and end-to-end service calls.
 - [x] **Phase 2 — Detection**: alarms, Config rules, GuardDuty, EventBridge rules.
-- [ ] **Phase 3 — Data collection**: `collector_lambda` writes evidence to S3 + DynamoDB.
-- [ ] **Phase 4 — Knowledge base + diagnosis**: runbooks, Bedrock KB, `diagnosis_lambda`.
-- [ ] **Phase 5 — Reporting + approval**: Slack message + approve/reject flow.
+- [x] **Phase 3 — Data collection**: `collector_lambda` writes evidence to S3 + DynamoDB.
+- [x] **Phase 4 — Knowledge base + diagnosis**: runbooks with direct context injection (no Bedrock Knowledge Bases/OpenSearch), `diagnosis_lambda` with Bedrock + JSON validation.
+- [x] **Phase 5 — Reporting + approval**: `notify_lambda` posts the diagnosis to Slack via incoming webhook with signed approval links; `approval_handler` (API Gateway `/approval`) flips `remediation.status` to approved/rejected and triggers remediation. Secrets come from SSM SecureStrings (see Phase 5 setup below).
 - [ ] **Phase 6 — Remediation**: `remediation_lambda` executes approved fixes.
 - [ ] **Phase 7 — Fault injection + evaluation**: break things on purpose, score the results.
 
@@ -224,6 +224,55 @@ curl "<ServiceAUrl>"
 ```
 
 The response should have HTTP 200 and `"overall_status": "success"`.
+
+## Phase 5 setup: Slack reporting + approvals
+
+The pipeline runs end to end even without Slack configured — messages are
+skipped (logged as errors) and incidents just sit in `pending_approval`.
+To switch the reporting/approval flow on:
+
+1. **Create a Slack incoming webhook** for your incident channel
+   (Slack → App settings → Incoming Webhooks). You get a URL like
+   `https://hooks.slack.com/services/T.../B.../...`.
+
+2. **Store the two secrets in SSM SecureStrings:**
+   ```bash
+   aws ssm put-parameter --name "/llm-incident-response/slack-webhook-url" \
+     --type SecureString --value "https://hooks.slack.com/services/..."
+
+   openssl rand -hex 32   # generate the approval secret
+   aws ssm put-parameter --name "/llm-incident-response/approval-token-secret" \
+     --type SecureString --value "<generated-hex>"
+   ```
+   These exact names are the template defaults — the Phase 5 IAM role is
+   scoped to read only these two parameters.
+
+3. **Deploy, then wire the approval links:** deploy once, copy the
+   `ApprovalUrl` stack output, then redeploy with
+   `ApprovalApiBaseUrl="<that url>"`. Slack messages now include signed
+   Approve/Reject links (HMAC over the incident id — unguessable, and
+   rejected server-side without a valid token).
+
+4. **Local tests** (no AWS calls needed for notify without the webhook param):
+   ```bash
+   sam local invoke NotifyFunction --event events/test-notify.json
+   # approval: token = HMAC-SHA256(secret, incident_id) hex:
+   echo -n '<incident_id>' | openssl dgst -sha256 -hmac '<secret>'
+   sam local invoke ApprovalFunction --event events/test-approval.json
+   ```
+
+5. **Unit tests** (no AWS account, SAM, or extra dependencies needed):
+   ```bash
+   python3 -m unittest discover -s tests
+   ```
+   32 tests covering both Phase 5 handlers with mocked boto3: approve/reject
+   happy paths, bad/missing token, already-processed conflicts (409),
+   malformed requests, Slack/SSM/DynamoDB failure degradation, and the
+   signed-approval-link construction. Runs on plain Python 3.9+.
+
+> Until Phase 6 is deployed, approving an incident marks it `approved` in
+> DynamoDB but no fix executes — the approval handler skips the remediation
+> invocation and says so on the confirmation page.
 
 ## Team workstreams
 
