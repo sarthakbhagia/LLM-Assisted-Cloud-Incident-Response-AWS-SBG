@@ -161,7 +161,7 @@ moving on.
 - [x] **Phase 5 — Reporting + approval**: `notify_lambda` posts the diagnosis to Slack via incoming webhook with signed approval links; `approval_handler` (API Gateway `/approval`) flips `remediation.status` to approved/rejected and triggers remediation. Secrets come from SSM SecureStrings (see Phase 5 setup below).
 - [x] **Phase 6 — Remediation**: `remediation_lambda` executes approved fixes (`scale_up`, `restart_service`, `lock_s3_bucket`, `tighten_iam_policy`, etc.).
 - [x] **Phase 6.5 — Closed-loop verification**: `verification_lambda` re-checks the original detection signal post-remediation and logs resolution status (`resolved`, `not_resolved`, `inconclusive`) to DynamoDB.
-- [ ] **Phase 7 — Fault injection + evaluation**: break things on purpose, score the results.
+- [x] **Phase 7 — Fault injection + evaluation**: fault injection scripts (`fault_injection/`), benchmark harness (`evaluation/run_evaluation.py`), metrics calculation engine (`evaluation/metrics.py`), and CSV/JSON output exporter (`evaluation/results/`).
 - [ ] **Phase 8 — Presentation dashboard**: read-only visualization dashboard API & React Web UI.
 
 *(Updates made to `infra/template.yaml` itself should be reflected here as we go.)*
