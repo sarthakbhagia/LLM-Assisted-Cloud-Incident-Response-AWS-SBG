@@ -1,0 +1,4 @@
+failure_mode,count,percentage_of_total
+none,7,77.78
+hallucinated_permission,1,11.11
+correlation_as_causation,1,11.11

@@ -1,0 +1,7 @@
+{
+  "source": "cloudwatch",
+  "fault_class": "resource_exhaustion",
+  "alarm_name": "incident-service-a-resource-exhaustion-dev",
+  "state": "ALARM",
+  "reason": "Test detection event"
+}
