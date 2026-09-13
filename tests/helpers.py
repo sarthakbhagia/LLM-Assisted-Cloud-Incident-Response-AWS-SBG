@@ -31,6 +31,8 @@ class _ClientError(Exception):
 _botocore.ClientError = _ClientError
 _botocore.exceptions = types.ModuleType("botocore.exceptions")
 _botocore.exceptions.ClientError = _ClientError
+_botocore.exceptions.BotoCoreError = Exception
+_botocore.exceptions.DataNotFoundError = Exception
 sys.modules.setdefault("botocore", _botocore)
 sys.modules.setdefault("botocore.exceptions", _botocore.exceptions)
 

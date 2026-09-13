@@ -1,0 +1,16 @@
+incident_id,fault_class,true_fault_class,suggested_action,confidence,used_rag,rca_correct,hallucinated,mttr_seconds,verification_status,failure_mode
+41c144fd-2471-48f3-b046-de3557d97387,resource_exhaustion,resource_exhaustion,scale_up,0.95,False,True,False,45.0,resolved,none
+215f4056-e3ad-4aa3-bf81-509e02b54829,misconfiguration,misconfiguration,lock_s3_bucket,0.95,False,True,False,45.0,resolved,none
+d457b6ca-cae3-45fa-8e02-1db6e82399cb,service_cascade,service_cascade,restart_downstream_service,0.95,False,True,False,45.0,resolved,none
+c7502ab2-264e-491a-b6c8-bf0561d845b6,resource_exhaustion,resource_exhaustion,scale_up,0.95,False,True,False,50.0,resolved,none
+db07a320-d0f3-44c9-97f2-1d29527d4c1d,misconfiguration,misconfiguration,lock_s3_bucket,0.95,False,True,False,50.0,resolved,hallucinated_permission
+85c2b11b-8ece-4457-a263-52ab18a9b80e,service_cascade,service_cascade,restart_downstream_service,0.95,False,True,False,50.0,resolved,none
+cf540956-d203-4bf7-8005-c16e75a06e38,resource_exhaustion,resource_exhaustion,scale_up,0.95,False,True,False,55.0,resolved,none
+4dc492a1-6e76-4324-b1d1-91e8877fa388,misconfiguration,misconfiguration,lock_s3_bucket,0.95,False,True,False,55.0,resolved,none
+928d3b62-a3c9-4070-9842-58a41e9f59e1,service_cascade,service_cascade,restart_downstream_service,0.95,False,True,False,55.0,resolved,none
+880b5a66-9151-49f4-9e53-a04867b04053,resource_exhaustion,resource_exhaustion,scale_up,0.95,False,True,False,60.0,resolved,none
+5f322b10-09a2-48e2-9375-57a94f319106,misconfiguration,misconfiguration,lock_s3_bucket,0.95,False,True,False,60.0,resolved,none
+d5b9d557-6ed3-4878-9d0e-bc63389eb731,service_cascade,service_cascade,restart_downstream_service,0.95,False,True,False,60.0,resolved,none
+bef49df3-f6c8-4f89-b7a2-58175d8c1391,resource_exhaustion,resource_exhaustion,scale_up,0.95,False,True,False,65.0,resolved,none
+43e0c875-f2d4-4c25-a524-37ff448de23f,misconfiguration,misconfiguration,lock_s3_bucket,0.95,False,True,False,65.0,resolved,none
+915a357c-edd8-4854-8298-60c4fd45b417,service_cascade,service_cascade,restart_downstream_service,0.85,False,True,False,65.0,not_resolved,correlation_as_causation

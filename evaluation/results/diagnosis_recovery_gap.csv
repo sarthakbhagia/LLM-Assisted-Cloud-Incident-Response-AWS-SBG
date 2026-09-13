@@ -1,0 +1,5 @@
+metric,value
+total_incidents,15
+high_confidence_incidents,15
+unresolved_high_confidence_incidents,1
+diagnosis_recovery_gap_pct,6.67
