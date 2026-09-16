@@ -428,7 +428,7 @@ Resources:
         Variables:
           INCIDENTS_TABLE: !Ref IncidentsTable
           DATA_LAKE_BUCKET: !Ref IncidentDataLake
-          BEDROCK_MODEL_ID: "us.anthropic.claude-3-5-sonnet-20241022-v2:0"
+          BEDROCK_MODEL_ID: "apac.anthropic.claude-3-5-sonnet-20241022-v2:0"
           NOTIFY_FUNCTION_NAME: !Ref NotifyFunction
 
   # ---------------------------------------------------------------------------
@@ -824,6 +824,158 @@ Resources:
       Action: lambda:InvokeFunction
       Principal: apigateway.amazonaws.com
 
+  # ===========================================================================
+  # PHASE 8 - DASHBOARD API (read-only visualization layer)
+  # Guardrail: this role MUST NOT have any write permissions.
+  # See PROJECT_SPEC.md Guardrails: "The Phase 8 dashboard Lambda/IAM role must
+  # be strictly read-only (DynamoDB GetItem/Query and S3 GetObject only)."
+  # ===========================================================================
+
+  # ---------------------------------------------------------------------------
+  # IAM role: Dashboard API Lambda.
+  # Read-only on incidents table and data lake. No write actions of any kind.
+  # ---------------------------------------------------------------------------
+  DashboardApiRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "incident-dashboard-api-role-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: incidents-table-read-only
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource: "arn:aws:dynamodb:*:*:table/incidents-*"
+                # Deny any write action explicitly to make the guardrail auditable
+              - Effect: Deny
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:BatchWriteItem
+                  - dynamodb:TransactWriteItems
+                Resource: "*"
+        - PolicyName: datalake-read-only
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt IncidentDataLake.Arn
+                  - !Sub "${IncidentDataLake.Arn}/incidents/*"
+                  - !Sub "${IncidentDataLake.Arn}/runbooks/*"
+                  - !Sub "${IncidentDataLake.Arn}/evaluation/*"
+              - Effect: Deny
+                Action:
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:PutObjectAcl
+                Resource: "*"
+
+  # ---------------------------------------------------------------------------
+  # Dashboard API Lambda — six read-only routes on the existing API Gateway
+  # ---------------------------------------------------------------------------
+  DashboardApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../src/dashboard/
+      Handler: app.lambda_handler
+      Role: !GetAtt DashboardApiRole.Arn
+      Description: >-
+        Phase 8 read-only dashboard API. Serves incident records, evidence
+        bundles, Phase 7 analytics, and runbook content. No write paths.
+      Timeout: 30
+      MemorySize: 256
+      Environment:
+        Variables:
+          INCIDENTS_TABLE: !Ref IncidentsTable
+          DATA_LAKE_BUCKET: !Ref IncidentDataLake
+      Events:
+        GetIncidents:
+          Type: Api
+          Properties:
+            Path: /api/incidents
+            Method: get
+        GetIncidentsOptions:
+          Type: Api
+          Properties:
+            Path: /api/incidents
+            Method: options
+        GetIncidentById:
+          Type: Api
+          Properties:
+            Path: /api/incidents/{incident_id}
+            Method: get
+        GetIncidentByIdOptions:
+          Type: Api
+          Properties:
+            Path: /api/incidents/{incident_id}
+            Method: options
+        GetEvidence:
+          Type: Api
+          Properties:
+            Path: /api/incidents/{incident_id}/evidence
+            Method: get
+        GetEvidenceOptions:
+          Type: Api
+          Properties:
+            Path: /api/incidents/{incident_id}/evidence
+            Method: options
+        GetAnalytics:
+          Type: Api
+          Properties:
+            Path: /api/analytics
+            Method: get
+        GetAnalyticsOptions:
+          Type: Api
+          Properties:
+            Path: /api/analytics
+            Method: options
+        GetRunbooks:
+          Type: Api
+          Properties:
+            Path: /api/runbooks
+            Method: get
+        GetRunbooksOptions:
+          Type: Api
+          Properties:
+            Path: /api/runbooks
+            Method: options
+        GetRunbookByFaultClass:
+          Type: Api
+          Properties:
+            Path: /api/runbooks/{fault_class}
+            Method: get
+        GetRunbookByFaultClassOptions:
+          Type: Api
+          Properties:
+            Path: /api/runbooks/{fault_class}
+            Method: options
+
+  DashboardApiFunctionApiPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref DashboardApiFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+
+
 # =============================================================================
 # OUTPUTS
 # =============================================================================
@@ -889,3 +1041,17 @@ Outputs:
   ServiceCUrl:
     Description: Service C endpoint
     Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/service-c"
+
+  DashboardApiFunctionArn:
+    Description: ARN of the Phase 8 read-only dashboard API Lambda
+    Value: !GetAtt DashboardApiFunction.Arn
+
+  DashboardApiUrl:
+    Description: >-
+      Phase 8 dashboard API base URL. Append /api/incidents, /api/analytics,
+      /api/runbooks etc. to call the read-only dashboard endpoints.
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/api"
+
+  DashboardApiRoleArn:
+    Description: ARN of the Phase 8 read-only dashboard IAM role (no write permissions)
+    Value: !GetAtt DashboardApiRole.Arn
