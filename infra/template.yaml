@@ -824,6 +824,131 @@ Resources:
       Action: lambda:InvokeFunction
       Principal: apigateway.amazonaws.com
 
+  # ===========================================================================
+  # PHASE 8 - PRESENTATION DASHBOARD
+  # Read-only API for the dashboard web interface.
+  # ===========================================================================
+
+  DashboardFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../src/dashboard/
+      Handler: app.lambda_handler
+      Role: !GetAtt DashboardRole.Arn
+      Description: Phase 8 read-only dashboard API - GET /incidents, GET /incidents/{id}, GET /results
+      Timeout: 30
+      MemorySize: 256
+      Environment:
+        Variables:
+          INCIDENTS_TABLE: !Ref IncidentsTable
+          DATA_LAKE_BUCKET: !Ref IncidentDataLake
+          COLLECTOR_FUNCTION_NAME: !Ref CollectorFunction
+          DIAGNOSIS_FUNCTION_NAME: !Ref DiagnosisFunction
+      Events:
+        # GET /incidents - list incidents with pagination and filtering
+        GetIncidents:
+          Type: Api
+          Properties:
+            Path: /incidents
+            Method: get
+        # GET /incidents/{incident_id} - get full incident detail with raw data
+        GetIncidentDetail:
+          Type: Api
+          Properties:
+            Path: /incidents/{incident_id}
+            Method: get
+        # GET /results - get evaluation results and metrics
+        GetResults:
+          Type: Api
+          Properties:
+            Path: /results
+            Method: get
+        # GET /health - health check
+        GetHealth:
+          Type: Api
+          Properties:
+            Path: /health
+            Method: get
+        # POST /inject - trigger fault injection
+        PostInject:
+          Type: Api
+          Properties:
+            Path: /inject
+            Method: post
+        # POST /diagnose - trigger manual diagnosis
+        PostDiagnose:
+          Type: Api
+          Properties:
+            Path: /diagnose
+            Method: post
+        # OPTIONS for CORS
+        OptionsIncidents:
+          Type: Api
+          Properties:
+            Path: /incidents
+            Method: options
+        OptionsIncidentDetail:
+          Type: Api
+          Properties:
+            Path: /incidents/{incident_id}
+            Method: options
+        OptionsResults:
+          Type: Api
+          Properties:
+            Path: /results
+            Method: options
+        OptionsInject:
+          Type: Api
+          Properties:
+            Path: /inject
+            Method: options
+        OptionsDiagnose:
+          Type: Api
+          Properties:
+            Path: /diagnose
+            Method: options
+
+  # Dashboard API Role
+  DashboardRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "incident-dashboard-role-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: dashboard-policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # DynamoDB read-only access to incidents table
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource: !GetAtt IncidentsTable.Arn
+              # S3 read-only access to incident data and evaluation results
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: 
+                  - !Sub "${IncidentDataLake.Arn}/incidents/*"
+                  - !Sub "${IncidentDataLake.Arn}/evaluation/*"
+              # Lambda invoke permissions for trigger endpoints
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource:
+                  - !GetAtt CollectorFunction.Arn
+                  - !GetAtt DiagnosisFunction.Arn
+
 # =============================================================================
 # OUTPUTS
 # =============================================================================
@@ -889,3 +1014,11 @@ Outputs:
   ServiceCUrl:
     Description: Service C endpoint
     Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/service-c"
+
+  DashboardFunctionArn:
+    Description: ARN of the Phase 8 dashboard API Lambda
+    Value: !GetAtt DashboardFunction.Arn
+
+  DashboardApiUrl:
+    Description: Phase 8 dashboard API base URL
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod"

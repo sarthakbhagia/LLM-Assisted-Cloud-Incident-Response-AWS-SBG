@@ -3,3 +3,5 @@ __pycache__/
 *.pyc
 .evaluation_tmp/
 .freebuff/
+dashboard/web/.env
+dashboard/web/node_modules/
