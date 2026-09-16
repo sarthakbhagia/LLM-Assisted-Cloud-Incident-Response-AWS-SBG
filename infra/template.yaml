@@ -858,7 +858,7 @@ Resources:
                   - dynamodb:GetItem
                   - dynamodb:Query
                   - dynamodb:Scan
-                Resource: !GetAtt IncidentsTable.Arn
+                Resource: "arn:aws:dynamodb:*:*:table/incidents-*"
                 # Deny any write action explicitly to make the guardrail auditable
               - Effect: Deny
                 Action:
