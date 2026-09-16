@@ -1,25 +1,25 @@
 {
-  "generated_at": "2026-09-13T12:47:06.366829+00:00",
-  "total_incidents": 9,
-  "mttr_seconds_avg": 50.0,
+  "generated_at": "2026-09-12T17:27:11.593603+00:00",
+  "total_incidents": 15,
+  "mttr_seconds_avg": 55.0,
   "rca_accuracy_pct": 100.0,
   "hallucination_rate_pct": 0.0,
-  "diagnosis_recovery_gap_pct": 11.11,
-  "high_confidence_incidents": 9,
+  "diagnosis_recovery_gap_pct": 6.67,
+  "high_confidence_incidents": 15,
   "unresolved_high_confidence_incidents": 1,
   "failure_taxonomy": {
-    "none": 7,
+    "none": 13,
     "hallucinated_permission": 1,
     "correlation_as_causation": 1
   },
   "rag_ablation_comparison": {
     "used_rag_true": {
-      "count": 9,
-      "accuracy_pct": 100.0
-    },
-    "used_rag_false": {
       "count": 0,
       "accuracy_pct": 0.0
+    },
+    "used_rag_false": {
+      "count": 15,
+      "accuracy_pct": 100.0
     }
   }
 }

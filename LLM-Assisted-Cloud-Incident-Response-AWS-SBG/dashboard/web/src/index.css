@@ -1,0 +1,130 @@
+@import 'tailwindcss/base';
+@import 'tailwindcss/components';
+@import 'tailwindcss/utilities';
+
+@layer base {
+  * {
+    @apply border-border-default;
+  }
+  
+  body {
+    @apply bg-bg-base text-text-primary font-sans antialiased;
+    margin: 0;
+  }
+  
+  /* Obsidian Command styling overrides */
+  html {
+    font-size: 13px; /* Base font size according to design spec */
+  }
+  
+  /* Custom scrollbars */
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  
+  ::-webkit-scrollbar-track {
+    @apply bg-bg-surface;
+  }
+  
+  ::-webkit-scrollbar-thumb {
+    @apply bg-border-strong rounded;
+  }
+  
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-text-muted;
+  }
+}
+
+@layer components {
+  /* Button styles */
+  .btn-primary {
+    @apply bg-bg-elevated border border-border-strong text-text-primary;
+    @apply hover:bg-border-strong hover:border-text-muted;
+    @apply px-4 py-2 rounded-button text-sm font-medium h-7;
+    @apply transition-colors duration-75;
+  }
+  
+  .btn-danger {
+    @apply bg-crimson-surface border border-crimson/40 text-crimson;
+    @apply hover:border-crimson/60;
+    @apply px-4 py-2 rounded-button text-sm font-medium h-7;
+    @apply transition-colors duration-75;
+  }
+  
+  .btn-ghost {
+    @apply border border-border-default text-text-secondary bg-transparent;
+    @apply hover:bg-bg-elevated;
+    @apply px-4 py-2 rounded-button text-sm font-medium h-7;
+    @apply transition-colors duration-75;
+  }
+  
+  /* Card styles */
+  .card {
+    @apply bg-bg-surface border border-border-default rounded-card p-4;
+  }
+  
+  .card-elevated {
+    @apply bg-bg-elevated border border-border-default rounded-card p-4;
+  }
+  
+  /* Badge styles */
+  .badge {
+    @apply px-2 py-1 rounded-badge text-xs font-medium;
+  }
+  
+  .badge-critical {
+    @apply bg-crimson-surface text-crimson;
+  }
+  
+  .badge-warning {
+    @apply bg-amber-surface text-amber;
+  }
+  
+  .badge-success {
+    @apply bg-emerald-surface text-emerald;
+  }
+  
+  .badge-info {
+    @apply bg-border-strong text-text-secondary;
+  }
+  
+  /* Status badges for pipeline stages */
+  .status-detected { @apply badge-info; }
+  .status-diagnosing { @apply bg-gray-900 text-purple-400; }
+  .status-pending-approval { @apply badge-warning; }
+  .status-approved { @apply badge-success; }
+  .status-executed { @apply badge-success; }
+  .status-resolved { @apply badge-success; }
+  .status-not-resolved { @apply badge-critical; }
+  .status-failed { @apply badge-critical; }
+  .status-rejected { @apply badge-info; }
+  
+  /* Table styles */
+  .table {
+    @apply w-full bg-bg-surface;
+  }
+  
+  .table-header {
+    @apply bg-bg-elevated text-text-secondary text-xs uppercase font-medium tracking-wide;
+  }
+  
+  .table-row {
+    @apply h-10 border-b border-border-subtle text-text-primary hover:bg-bg-elevated;
+    @apply transition-colors duration-75;
+  }
+  
+  .table-cell {
+    @apply px-3 py-2 text-sm;
+  }
+  
+  /* Monospaced elements */
+  .mono {
+    @apply font-mono text-xs;
+  }
+  
+  /* Pulse animation for loading states */
+  .pulse-loading {
+    @apply animate-pulse bg-bg-elevated;
+  }
+}

@@ -1,5 +1,5 @@
 metric,value
-total_incidents,9
-high_confidence_incidents,9
+total_incidents,15
+high_confidence_incidents,15
 unresolved_high_confidence_incidents,1
-diagnosis_recovery_gap_pct,11.11
+diagnosis_recovery_gap_pct,6.67

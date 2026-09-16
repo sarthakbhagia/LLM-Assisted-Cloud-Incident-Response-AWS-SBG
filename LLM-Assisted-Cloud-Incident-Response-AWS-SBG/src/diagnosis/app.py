@@ -497,6 +497,27 @@ def _update_dynamodb_diagnosis(
                 ":fm": failure_mode,
                 ":exp": diagnosis_output["explanation"],
             },
+            ConditionExpression="attribute_exists(incident_id)"
+            ExpressionAttributeNames={
+                "#rc": "root_cause",
+                "#conf": "confidence",
+                "#ar": "affected_resources",
+                "#sa": "suggested_action",
+                "#rt": "reasoning_trace",
+                "#ur": "used_rag",
+                "#fm": "failure_mode",
+                "#exp": "explanation",
+            },
+            ExpressionAttributeValues={
+                ":rc": diagnosis_output["root_cause"],
+                ":conf": str(diagnosis_output["confidence"]),
+                ":ar": diagnosis_output["affected_resources"],
+                ":sa": diagnosis_output["suggested_action"],
+                ":rt": diagnosis_output["reasoning_trace"],
+                ":ur": used_rag,
+                ":fm": failure_mode,
+                ":exp": diagnosis_output["explanation"],
+            },
         )
         logger.info(json.dumps({
             "event": "dynamodb_diagnosis_updated",

@@ -167,6 +167,10 @@ Resources:
                 Resource: !Sub "${IncidentDataLake.Arn}/runbooks/*"
               - Effect: Allow
                 Action:
+                  - s3:ListBucket
+                Resource: !GetAtt IncidentDataLake.Arn
+              - Effect: Allow
+                Action:
                   - dynamodb:PutItem
                   - dynamodb:UpdateItem
                   - dynamodb:GetItem
@@ -190,8 +194,10 @@ Resources:
                 Action:
                   - lambda:InvokeFunction
                 Resource:
-                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:*DiagnosisFunction*"
-                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:*NotifyFunction*"
+                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:llm-incident-response-DiagnosisFunction*"
+                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:llm-incident-response-NotifyFunction*"
+                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:llm-incident-response-RemediationFunction*"
+                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:llm-incident-response-ApprovalFunction*"
 
 
   # ---------------------------------------------------------------------------

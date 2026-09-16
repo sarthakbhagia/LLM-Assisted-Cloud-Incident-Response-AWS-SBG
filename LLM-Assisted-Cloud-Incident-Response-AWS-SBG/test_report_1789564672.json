@@ -1,0 +1,99 @@
+{
+  "timestamp": "2026-09-16T13:17:52.347315",
+  "summary": {
+    "total_tests": 22,
+    "passed": 20,
+    "failed": 2,
+    "success_rate": "90.9%"
+  },
+  "phase_results": {
+    "Phase 0 - Infrastructure": {
+      "passed": 2,
+      "total": 2,
+      "success_rate": "100.0%",
+      "status": "PASS"
+    },
+    "Phase 1 - Demo App": {
+      "passed": 3,
+      "total": 3,
+      "success_rate": "100.0%",
+      "status": "PASS"
+    },
+    "Phase 2 - Detection": {
+      "passed": 5,
+      "total": 5,
+      "success_rate": "100.0%",
+      "status": "PASS"
+    },
+    "Phase 3 - Collection": {
+      "passed": 1,
+      "total": 1,
+      "success_rate": "100.0%",
+      "status": "PASS"
+    },
+    "Phase 4 - Diagnosis": {
+      "passed": 2,
+      "total": 2,
+      "success_rate": "100.0%",
+      "status": "PASS"
+    },
+    "Phase 5 - Reporting/Approval": {
+      "passed": 2,
+      "total": 2,
+      "success_rate": "100.0%",
+      "status": "PASS"
+    },
+    "Phase 6 - Remediation": {
+      "passed": 3,
+      "total": 3,
+      "success_rate": "100.0%",
+      "status": "PASS"
+    },
+    "Phase 6.5 - Verification": {
+      "passed": 1,
+      "total": 1,
+      "success_rate": "100.0%",
+      "status": "PASS"
+    },
+    "Phase 7 - Evaluation": {
+      "passed": 1,
+      "total": 1,
+      "success_rate": "100.0%",
+      "status": "PASS"
+    },
+    "Integration Tests": {
+      "passed": 1,
+      "total": 3,
+      "success_rate": "33.3%",
+      "status": "FAIL"
+    }
+  },
+  "detailed_results": {
+    "phase_0_s3": true,
+    "phase_0_dynamodb": true,
+    "phase_1_serviceafunction": true,
+    "phase_1_servicebfunction": true,
+    "phase_1_servicecfunction": true,
+    "phase_2_alarm_exhaustion": true,
+    "phase_2_alarm_errors": true,
+    "phase_2_alarm_cascade": true,
+    "phase_2_config_s3": true,
+    "phase_2_config_policy": true,
+    "phase_3_collector": true,
+    "phase_4_diagnosis": true,
+    "phase_4_runbooks": true,
+    "phase_5_notify": true,
+    "phase_5_approval": true,
+    "phase_6_remediation": true,
+    "phase_6_actions": true,
+    "phase_6_5_verification": true,
+    "phase_7_evaluation": true,
+    "service_communication": false,
+    "bedrock_access": false,
+    "e2e_simulation": true
+  },
+  "recommendations": [
+    "Check Bedrock service availability and IAM permissions",
+    "Verify API Gateway deployment and service endpoints"
+  ]
+}
