@@ -385,8 +385,7 @@ class E2ETestRunner:
             
             test_prompt = "Hello, this is a test."
             models = [
-                ("apac.anthropic.claude-3-5-sonnet-20241022-v2:0", "anthropic"),
-                ("anthropic.claude-3-sonnet-20240229-v1:0", "anthropic"),
+                ("apac.amazon.nova-pro-v1:0", "nova"),
                 ("apac.amazon.nova-micro-v1:0", "nova"),
             ]
             

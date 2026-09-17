@@ -1,0 +1,128 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Demo Mode Control Lambda - separate stack
+
+Parameters:
+  Environment:
+    Type: String
+    Default: staging
+    AllowedValues: [dev, staging, prod]
+  MainStackName:
+    Type: String
+    Default: llm-incident-response-staging
+    Description: Name of the main incident response stack to import values from
+
+Resources:
+
+  DemoControlRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "incident-demo-control-role-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: demo-invoke-approval
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource:
+                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:llm-incident-response-${Environment}-ApprovalFunction*"
+        - PolicyName: demo-cloudwatch-alarms
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudwatch:SetAlarmState
+                Resource: '*'
+        - PolicyName: demo-config-evaluation
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - config:StartConfigRulesEvaluation
+                Resource: '*'
+        - PolicyName: demo-ssm-secret
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/llm-incident-response/approval-token-secret"
+        - PolicyName: demo-dynamodb-read
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                Resource:
+                  Fn::ImportValue: !Sub "${MainStackName}-IncidentsTableArn"
+
+  DemoControlFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../backend/demo_control/
+      Handler: demo_control_lambda.lambda_handler
+      Role: !GetAtt DemoControlRole.Arn
+      Runtime: python3.12
+      Timeout: 30
+      MemorySize: 256
+      Architectures: [arm64]
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref Environment
+          INCIDENTS_TABLE:
+            Fn::ImportValue: !Sub "${MainStackName}-IncidentsTableName"
+          APPROVAL_FUNCTION_NAME:
+            Fn::ImportValue: !Sub "${MainStackName}-ApprovalFunctionArn"
+          DATA_LAKE_BUCKET:
+            Fn::ImportValue: !Sub "${MainStackName}-IncidentDataLakeName"
+      Events:
+        DemoInject:
+          Type: Api
+          Properties:
+            Path: /demo/inject
+            Method: post
+        DemoInjectOptions:
+          Type: Api
+          Properties:
+            Path: /demo/inject
+            Method: options
+        DemoApprove:
+          Type: Api
+          Properties:
+            Path: /demo/approve/{incident_id}
+            Method: post
+        DemoApproveOptions:
+          Type: Api
+          Properties:
+            Path: /demo/approve/{incident_id}
+            Method: options
+
+  DemoControlFunctionApiPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref DemoControlFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+
+Outputs:
+  DemoControlFunctionArn:
+    Description: ARN of the Demo Mode control Lambda
+    Value: !GetAtt DemoControlFunction.Arn
+  DemoControlUrl:
+    Description: Demo Mode control API base URL
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/demo"

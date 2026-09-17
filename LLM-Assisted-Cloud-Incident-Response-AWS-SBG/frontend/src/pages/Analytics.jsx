@@ -42,11 +42,11 @@ export default function Analytics() {
 
   const fetchData = async () => {
     try {
-      const [resultsData, incidentsData] = await Promise.all([
-        apiClient.getResults(),
+      const [analyticsData, incidentsData] = await Promise.all([
+        apiClient.getAnalytics(),
         apiClient.getIncidents({ limit: 100 })
       ])
-      setResults(resultsData)
+      setResults(analyticsData)
       setIncidents(incidentsData.incidents || [])
       setError(null)
     } catch (err) {

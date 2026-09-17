@@ -147,10 +147,7 @@ Resources:
                 Resource: '*'
               - Effect: Allow
                 Action:
-                  - ecs:DescribeServices
-                  - ecs:DescribeTasks
-                  - ecs:ListServices
-                  - ecs:ListTasks
+                  - lambda:ListFunctions
                 Resource: '*'
         - PolicyName: datalake-write
           PolicyDocument:
@@ -183,8 +180,6 @@ Resources:
               - Effect: Allow
                 Action:
                   - bedrock:InvokeModel
-                  - bedrock:Retrieve
-                  - bedrock:RetrieveAndGenerate
                 Resource: '*'
         - PolicyName: invoke-downstream-lambdas
           PolicyDocument:
@@ -194,10 +189,10 @@ Resources:
                 Action:
                   - lambda:InvokeFunction
                 Resource:
-                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:llm-incident-response-DiagnosisFunction*"
-                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:llm-incident-response-NotifyFunction*"
-                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:llm-incident-response-RemediationFunction*"
-                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:llm-incident-response-ApprovalFunction*"
+                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:llm-incident-response-${Environment}-DiagnosisFunction*"
+                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:llm-incident-response-${Environment}-NotifyFunction*"
+                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:llm-incident-response-${Environment}-RemediationFunction*"
+                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:llm-incident-response-${Environment}-ApprovalFunction*"
 
 
   # ---------------------------------------------------------------------------
@@ -230,38 +225,37 @@ Resources:
               - Effect: Allow
                 Action:
                   - s3:GetObject
+                  - s3:PutPublicAccessBlock
                 Resource: !Sub "${IncidentDataLake.Arn}/incidents/*"
-        - PolicyName: remediation-actions
+              - Effect: Allow
+                Action:
+                  - cloudwatch:GetMetricStatistics
+                  - cloudwatch:GetMetricData
+                  - config:GetComplianceDetailsByConfigRule
+                Resource: '*'
+        - PolicyName: remediation-lambda-actions
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
-              # scale_up - Application Auto Scaling + ECS update service
+              # scale_up - Lambda reserved concurrency
               - Effect: Allow
                 Action:
-                  - application-autoscaling:RegisterScalableTarget
-                  - application-autoscaling:PutScalingPolicy
-                  - application-autoscaling:DeregisterScalableTarget
+                  - lambda:GetFunctionConcurrency
+                  - lambda:PutFunctionConcurrency
+                  - lambda:ListFunctions
                 Resource: '*'
+              # restart_service / restart_downstream_service - bump env var
               - Effect: Allow
                 Action:
-                  - ecs:UpdateService
-                  - ecs:DescribeServices
-                Resource: '*'
-
-              # restart_service / restart_downstream_service
-              - Effect: Allow
-                Action:
-                  - ecs:StopTask
-                  - ecs:ListTasks
-                  - ecs:DescribeTasks
+                  - lambda:GetFunctionConfiguration
+                  - lambda:UpdateFunctionConfiguration
+                  - lambda:ListFunctions
                 Resource: '*'
 
-              # lock_s3_bucket
-              - Effect: Allow
-                Action:
-                  - s3:PutPublicAccessBlock
-                Resource: '*'
-
+        - PolicyName: remediation-iam-actions
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
               # tighten_iam_policy
               - Effect: Allow
                 Action:
@@ -269,6 +263,15 @@ Resources:
                   - iam:DeleteRolePolicy
                   - iam:ListRolePolicies
                 Resource: '*'
+        - PolicyName: invoke-verification-lambda
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource:
+                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:llm-incident-response-${Environment}-VerificationFunction*"
 
   # ===========================================================================
   # PHASE 1 - DEMO APPLICATION
@@ -308,8 +311,8 @@ Resources:
   ServiceCFunction:
     Type: AWS::Serverless::Function
     Properties:
-      CodeUri: ../src/service_c/
-      Handler: app.lambda_handler
+      CodeUri: ../backend/service_c/
+      Handler: diagnosis_lambda.lambda_handler
       Role: !GetAtt DemoAppRole.Arn
       Events:
         Api:
@@ -324,8 +327,8 @@ Resources:
   ServiceBFunction:
     Type: AWS::Serverless::Function
     Properties:
-      CodeUri: ../src/service_b/
-      Handler: app.lambda_handler
+      CodeUri: ../backend/service_b/
+      Handler: diagnosis_lambda.lambda_handler
       Role: !GetAtt DemoAppRole.Arn
       Environment:
         Variables:
@@ -343,8 +346,8 @@ Resources:
   ServiceAFunction:
     Type: AWS::Serverless::Function
     Properties:
-      CodeUri: ../src/service_a/
-      Handler: app.lambda_handler
+      CodeUri: ../backend/service_a/
+      Handler: diagnosis_lambda.lambda_handler
       Role: !GetAtt DemoAppRole.Arn
       Environment:
         Variables:
@@ -409,8 +412,8 @@ Resources:
   CollectorFunction:
     Type: AWS::Serverless::Function
     Properties:
-      CodeUri: ../src/collector/
-      Handler: app.lambda_handler
+      CodeUri: ../backend/collector/
+      Handler: diagnosis_lambda.lambda_handler
       Role: !GetAtt CollectorDiagnosisRole.Arn
       Description: Receives incident detection events, collects observability evidence, writes to S3+DynamoDB, invokes diagnosis
       Timeout: 300
@@ -424,8 +427,8 @@ Resources:
   DiagnosisFunction:
     Type: AWS::Serverless::Function
     Properties:
-      CodeUri: ../src/diagnosis/
-      Handler: app.lambda_handler
+      CodeUri: ../backend/diagnosis/
+      Handler: diagnosis_lambda.lambda_handler
       Role: !GetAtt CollectorDiagnosisRole.Arn
       Description: Receives incident evidence, loads runbook context, calls Bedrock for LLM diagnosis
       Timeout: 120
@@ -434,7 +437,7 @@ Resources:
         Variables:
           INCIDENTS_TABLE: !Ref IncidentsTable
           DATA_LAKE_BUCKET: !Ref IncidentDataLake
-          BEDROCK_MODEL_ID: "apac.anthropic.claude-3-5-sonnet-20241022-v2:0"
+          BEDROCK_MODEL_ID: "apac.amazon.nova-pro-v1:0"
           NOTIFY_FUNCTION_NAME: !Ref NotifyFunction
 
   # ---------------------------------------------------------------------------
@@ -481,98 +484,8 @@ Resources:
       Principal: events.amazonaws.com
       SourceArn: !GetAtt CloudWatchIncidentEventRule.Arn
   # ===========================================================================
-  # PHASE 2 - AWS CONFIG DETECTION
-  # Detects potentially unsafe AWS configurations.
+  # PHASE 2 - GUARDDUTY DETECTION (AWS Config disabled - only one recorder/channel per account)
   # ===========================================================================
-
-  ConfigRecorder:
-    Type: AWS::Config::ConfigurationRecorder
-    Properties:
-      Name: !Sub "incident-config-recorder-${Environment}"
-      RecordingGroup:
-        AllSupported: true
-        IncludeGlobalResourceTypes: true
-      RoleARN: !GetAtt ConfigRole.Arn
-
-  ConfigDeliveryChannel:
-    Type: AWS::Config::DeliveryChannel
-    Properties:
-      Name: !Sub "incident-config-delivery-${Environment}"
-      S3BucketName: !Ref IncidentDataLake
-
-  ConfigRole:
-    Type: AWS::IAM::Role
-    Properties:
-      RoleName: !Sub "incident-config-role-${Environment}"
-      AssumeRolePolicyDocument:
-        Version: "2012-10-17"
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service:
-                - config.amazonaws.com
-            Action:
-              - sts:AssumeRole
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/service-role/AWS_ConfigRole
-
-  PublicS3BucketConfigRule:
-    Type: AWS::Config::ConfigRule
-    DependsOn: [ConfigRecorder, ConfigDeliveryChannel]
-    Properties:
-      ConfigRuleName: !Sub "incident-public-s3-${Environment}"
-      Description: Detects S3 buckets with public access
-      Source:
-        Owner: AWS
-        SourceIdentifier: S3_BUCKET_PUBLIC_READ_PROHIBITED
-
-  IAMPolicyConfigRule:
-    Type: AWS::Config::ConfigRule
-    DependsOn: [ConfigRecorder, ConfigDeliveryChannel]
-    Properties:
-      ConfigRuleName: !Sub "incident-iam-policy-${Environment}"
-      Description: Detects IAM policies that may be overly permissive
-      Source:
-        Owner: AWS
-        SourceIdentifier: IAM_POLICY_NO_STATEMENTS_WITH_ADMIN_ACCESS
-  ConfigIncidentEventRule:
-    Type: AWS::Events::Rule
-    Properties:
-      Name: !Sub "incident-config-detection-${Environment}"
-      Description: Routes AWS Config non-compliance events to the collector
-      EventPattern:
-        source:
-          - aws.config
-        detail-type:
-          - "Config Rules Compliance Change"
-        detail:
-          newEvaluationResult:
-            complianceType:
-              - NON_COMPLIANT
-      Targets:
-        - Arn: !GetAtt CollectorFunction.Arn
-          Id: ConfigCollectorTarget
-          InputTransformer:
-            InputPathsMap:
-              rule_name: "$.detail.configRuleName"
-              resource_type: "$.detail.resourceType"
-              resource_id: "$.detail.resourceId"
-            InputTemplate: |
-              {
-                "source": "aws_config",
-                "fault_class": "misconfiguration",
-                "config_rule": <rule_name>,
-                "resource_type": <resource_type>,
-                "resource_id": <resource_id>
-              }
-
-  ConfigIncidentEventPermission:
-    Type: AWS::Lambda::Permission
-    Properties:
-      FunctionName: !Ref CollectorFunction
-      Action: lambda:InvokeFunction
-      Principal: events.amazonaws.com
-      SourceArn: !GetAtt ConfigIncidentEventRule.Arn
 
   GuardDutyIncidentEventRule:
     Type: AWS::Events::Rule
@@ -668,8 +581,8 @@ Resources:
   RemediationFunction:
     Type: AWS::Serverless::Function
     Properties:
-      CodeUri: ../src/remediation/
-      Handler: app.lambda_handler
+      CodeUri: ../backend/remediation/
+      Handler: remediation_lambda.lambda_handler
       Role: !GetAtt RemediationRole.Arn
       Description: Executes the approved remediation action then async-invokes the verification Lambda
       Timeout: 300
@@ -689,8 +602,8 @@ Resources:
   VerificationFunction:
     Type: AWS::Serverless::Function
     Properties:
-      CodeUri: ../src/verification/
-      Handler: app.lambda_handler
+      CodeUri: ../backend/verification/
+      Handler: verification_lambda.lambda_handler
       Role: !GetAtt RemediationRole.Arn
       Description: Re-checks the original incident signal post-remediation and writes verification outcome to DynamoDB
       Timeout: 600
@@ -731,8 +644,8 @@ Resources:
   NotifyFunction:
     Type: AWS::Serverless::Function
     Properties:
-      CodeUri: ../src/reporting/
-      Handler: app.lambda_handler
+      CodeUri: ../backend/reporting/
+      Handler: diagnosis_lambda.lambda_handler
       Role: !GetAtt ReportingApprovalRole.Arn
       Description: Formats the diagnosis into a Slack message and posts it via incoming webhook
       Timeout: 30
@@ -747,8 +660,8 @@ Resources:
   ApprovalFunction:
     Type: AWS::Serverless::Function
     Properties:
-      CodeUri: ../src/approval/
-      Handler: app.lambda_handler
+      CodeUri: ../backend/approval/
+      Handler: approval_handler.lambda_handler
       Role: !GetAtt ReportingApprovalRole.Arn
       Description: Approve/reject endpoint; updates incident status and invokes remediation when approved
       Timeout: 30
@@ -900,8 +813,8 @@ Resources:
   DashboardApiFunction:
     Type: AWS::Serverless::Function
     Properties:
-      CodeUri: ../src/dashboard/
-      Handler: app.lambda_handler
+      CodeUri: ../backend/dashboard/
+      Handler: dashboard_api_lambda.lambda_handler
       Role: !GetAtt DashboardApiRole.Arn
       Description: >-
         Phase 8 read-only dashboard API. Serves incident records, evidence
@@ -974,16 +887,14 @@ Resources:
             Path: /api/runbooks/{fault_class}
             Method: options
 
-  DashboardApiFunctionApiPermission:
-    Type: AWS::Lambda::Permission
-    Properties:
-      FunctionName: !Ref DashboardApiFunction
-      Action: lambda:InvokeFunction
-      Principal: apigateway.amazonaws.com
+# DashboardApiFunctionApiPermission:
+#     Type: AWS::Lambda::Permission
+#     Properties:
+#       FunctionName: !Ref DashboardApiFunction
+#       Action: lambda:InvokeFunction
+#       Principal: apigateway.amazonaws.com
 
 
-# =============================================================================
-# OUTPUTS
 # =============================================================================
 
 Outputs:
@@ -991,14 +902,26 @@ Outputs:
   IncidentDataLakeName:
     Description: Name of the S3 data lake bucket
     Value: !Ref IncidentDataLake
+    Export:
+      Name: !Sub "${AWS::StackName}-IncidentDataLakeName"
 
   IncidentsTableName:
     Description: Name of the DynamoDB incidents table
     Value: !Ref IncidentsTable
+    Export:
+      Name: !Sub "${AWS::StackName}-IncidentsTableName"
 
-  CollectorDiagnosisRoleArn:
-    Description: ARN of the collector/diagnosis IAM role
-    Value: !GetAtt CollectorDiagnosisRole.Arn
+  IncidentsTableArn:
+    Description: ARN of the DynamoDB incidents table
+    Value: !GetAtt IncidentsTable.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-IncidentsTableArn"
+
+  ApprovalFunctionArn:
+    Description: ARN of the Phase 5 approval endpoint Lambda
+    Value: !GetAtt ApprovalFunction.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-ApprovalFunctionArn"
 
   RemediationRoleArn:
     Description: ARN of the remediation Lambda role
@@ -1019,10 +942,6 @@ Outputs:
   NotifyFunctionArn:
     Description: ARN of the Phase 5 notify (Slack reporting) Lambda
     Value: !GetAtt NotifyFunction.Arn
-
-  ApprovalFunctionArn:
-    Description: ARN of the Phase 5 approval endpoint Lambda
-    Value: !GetAtt ApprovalFunction.Arn
 
   RemediationFunctionArn:
     Description: ARN of the Phase 6 remediation Lambda

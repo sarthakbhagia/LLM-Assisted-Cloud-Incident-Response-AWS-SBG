@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
-import { AlertTriangle, Clock, TrendingUp, CheckCircle, Zap, Loader2, Check, AlertCircle } from 'lucide-react'
+import { AlertTriangle, Clock, TrendingUp, CheckCircle } from 'lucide-react'
 import IncidentFeed from '../components/IncidentFeed'
+import DemoControls from '../components/DemoControls'
 import { apiClient } from '../config/api'
 import { POLLING_INTERVALS } from '../utils/constants'
 import { formatMTTR } from '../utils/helpers'
@@ -13,8 +14,6 @@ export default function Overview() {
     averageMTTR: 0
   })
   const [loading, setLoading] = useState(true)
-  const [injectingFault, setInjectingFault] = useState(null)
-  const [isDisabled, setIsDisabled] = useState(false)
   const [toast, setToast] = useState(null)
   
   const feedRef = useRef(null)
@@ -78,41 +77,6 @@ export default function Overview() {
     return () => clearInterval(interval)
   }, [])
 
-  const handleTriggerFault = async (faultClass) => {
-    if (isDisabled || injectingFault) return
-
-    setInjectingFault(faultClass)
-    setToast(null)
-
-    try {
-      await apiClient.injectFault(faultClass)
-      setToast({
-        type: 'success',
-        message: 'Fault injected. Watch the incident feed for detection.'
-      })
-      
-      // Auto scroll to incident feed
-      if (feedRef.current) {
-        feedRef.current.scrollIntoView({ behavior: 'smooth' })
-      }
-      
-      // Refresh KPIs quickly after injection
-      setTimeout(fetchKPIs, 2000)
-    } catch (err) {
-      console.error('Failed to inject fault:', err)
-      setToast({
-        type: 'error',
-        message: err.message || 'Failed to trigger fault injection.'
-      })
-    } finally {
-      setInjectingFault(null)
-      setIsDisabled(true)
-      setTimeout(() => {
-        setIsDisabled(false)
-      }, 10000)
-    }
-  }
-
   return (
     <div className="space-y-6">
       {/* Toast Notification */}
@@ -139,68 +103,8 @@ export default function Overview() {
         </div>
       )}
 
-      {/* Section A — Fault Injection Panel */}
-      <div className="card p-6 border-border-strong">
-        <div className="flex items-center space-x-2 mb-2">
-          <Zap className="w-5 h-5 text-amber" />
-          <h2 className="text-base font-semibold text-text-primary">Trigger Fault Injection</h2>
-        </div>
-        <p className="text-xs text-text-secondary mb-4">
-          Simulate cloud environment failures to trigger the autonomous incident response pipeline end to end.
-        </p>
-        
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-          <button
-            onClick={() => handleTriggerFault('resource_exhaustion')}
-            disabled={isDisabled || injectingFault !== null}
-            className="btn-primary flex items-center justify-center space-x-2 py-2 h-auto text-xs sm:text-sm disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            {injectingFault === 'resource_exhaustion' ? (
-              <>
-                <Loader2 className="w-4 h-4 animate-spin text-amber" />
-                <span>Injecting...</span>
-              </>
-            ) : (
-              <span>Trigger Resource Exhaustion</span>
-            )}
-          </button>
-
-          <button
-            onClick={() => handleTriggerFault('misconfiguration')}
-            disabled={isDisabled || injectingFault !== null}
-            className="btn-primary flex items-center justify-center space-x-2 py-2 h-auto text-xs sm:text-sm disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            {injectingFault === 'misconfiguration' ? (
-              <>
-                <Loader2 className="w-4 h-4 animate-spin text-amber" />
-                <span>Injecting...</span>
-              </>
-            ) : (
-              <span>Trigger Misconfiguration</span>
-            )}
-          </button>
-
-          <button
-            onClick={() => handleTriggerFault('service_cascade')}
-            disabled={isDisabled || injectingFault !== null}
-            className="btn-primary flex items-center justify-center space-x-2 py-2 h-auto text-xs sm:text-sm disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            {injectingFault === 'service_cascade' ? (
-              <>
-                <Loader2 className="w-4 h-4 animate-spin text-amber" />
-                <span>Injecting...</span>
-              </>
-            ) : (
-              <span>Trigger Service Cascade</span>
-            )}
-          </button>
-        </div>
-        {isDisabled && (
-          <p className="text-[11px] text-text-muted mt-2">
-            Cooldown active — buttons will re-enable shortly to prevent duplicate injections.
-          </p>
-        )}
-      </div>
+      {/* Section A — Demo Mode Controls */}
+      <DemoControls />
 
       {/* Section B — KPI Cards */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">

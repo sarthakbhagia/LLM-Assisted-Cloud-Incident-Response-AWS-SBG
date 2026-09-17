@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import re
+from decimal import Decimal
 import boto3
 from botocore.exceptions import ClientError
 
@@ -489,7 +490,7 @@ def _update_dynamodb_diagnosis(
             },
             ExpressionAttributeValues={
                 ":rc": diagnosis_output["root_cause"],
-                ":conf": str(diagnosis_output["confidence"]),
+                ":conf": Decimal(str(diagnosis_output["confidence"])),
                 ":ar": diagnosis_output["affected_resources"],
                 ":sa": diagnosis_output["suggested_action"],
                 ":rt": diagnosis_output["reasoning_trace"],
@@ -498,26 +499,6 @@ def _update_dynamodb_diagnosis(
                 ":exp": diagnosis_output["explanation"],
             },
             ConditionExpression="attribute_exists(incident_id)"
-            ExpressionAttributeNames={
-                "#rc": "root_cause",
-                "#conf": "confidence",
-                "#ar": "affected_resources",
-                "#sa": "suggested_action",
-                "#rt": "reasoning_trace",
-                "#ur": "used_rag",
-                "#fm": "failure_mode",
-                "#exp": "explanation",
-            },
-            ExpressionAttributeValues={
-                ":rc": diagnosis_output["root_cause"],
-                ":conf": str(diagnosis_output["confidence"]),
-                ":ar": diagnosis_output["affected_resources"],
-                ":sa": diagnosis_output["suggested_action"],
-                ":rt": diagnosis_output["reasoning_trace"],
-                ":ur": used_rag,
-                ":fm": failure_mode,
-                ":exp": diagnosis_output["explanation"],
-            },
         )
         logger.info(json.dumps({
             "event": "dynamodb_diagnosis_updated",

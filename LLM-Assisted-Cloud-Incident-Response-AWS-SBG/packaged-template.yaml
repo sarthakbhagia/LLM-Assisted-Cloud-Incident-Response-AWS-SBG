@@ -1,0 +1,1050 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: 'LLM-Assisted Cloud Incident Response - serverless pipeline. Phase 0:
+  infra skeleton (data lake, incident table, IAM roles).
+
+  '
+Globals:
+  Function:
+    Runtime: python3.12
+    Timeout: 60
+    MemorySize: 256
+    Architectures:
+    - arm64
+    Tracing: Active
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues:
+    - dev
+    - staging
+    - prod
+    Description: Deployment environment, used to suffix resource names.
+  ServiceBUrl:
+    Type: String
+    Default: http://placeholder-service-b
+    Description: HTTP endpoint used by Service A to call Service B.
+  ServiceCUrl:
+    Type: String
+    Default: http://placeholder-service-c
+    Description: HTTP endpoint used by Service B to call Service C.
+  SlackWebhookUrlSsm:
+    Type: String
+    Default: /llm-incident-response/slack-webhook-url
+    Description: 'Name of the SSM SecureString parameter holding the Slack incoming
+      webhook URL (Phase 5). If the parameter does not exist, Slack posting is skipped
+      and the pipeline continues (logged as an error).
+
+      '
+  ApprovalTokenSecretSsm:
+    Type: String
+    Default: /llm-incident-response/approval-token-secret
+    Description: 'Name of the SSM SecureString parameter holding the shared HMAC secret
+      used to sign approval links (Phase 5). If the parameter does not exist, no approval
+      links are included in Slack messages and approval requests are rejected (fail
+      closed).
+
+      '
+  ApprovalApiBaseUrl:
+    Type: String
+    Default: ''
+    Description: 'Base URL of the approval endpoint used in Slack approval links,
+      e.g. https://<api-id>.execute-api.<region>.amazonaws.com/Prod/approval. Leave
+      empty to omit approval links from Slack messages.
+
+      '
+Resources:
+  IncidentDataLake:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName:
+        Fn::Sub: llm-incident-datalake-${AWS::AccountId}-${Environment}
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+    Metadata:
+      SamResourceId: IncidentDataLake
+  IncidentsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName:
+        Fn::Sub: incidents-${Environment}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+      - AttributeName: incident_id
+        AttributeType: S
+      KeySchema:
+      - AttributeName: incident_id
+        KeyType: HASH
+      StreamSpecification:
+        StreamViewType: NEW_IMAGE
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+    Metadata:
+      SamResourceId: IncidentsTable
+  CollectorDiagnosisRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName:
+        Fn::Sub: incident-collector-diagnosis-role-${Environment}
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: lambda.amazonaws.com
+          Action: sts:AssumeRole
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+      - PolicyName: observability-read
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - logs:DescribeLogGroups
+            - logs:GetLogEvents
+            - logs:FilterLogEvents
+            - logs:StartQuery
+            - logs:GetQueryResults
+            - logs:DescribeLogStreams
+            Resource: '*'
+          - Effect: Allow
+            Action:
+            - cloudwatch:GetMetricData
+            - cloudwatch:GetMetricStatistics
+            - cloudwatch:ListMetrics
+            Resource: '*'
+          - Effect: Allow
+            Action:
+            - xray:GetTraceSummaries
+            - xray:BatchGetTraces
+            - xray:GetServiceGraph
+            - xray:GetTraceGraph
+            Resource: '*'
+          - Effect: Allow
+            Action:
+            - config:GetComplianceDetailsByConfigRule
+            - config:GetResourceConfigHistory
+            - config:DescribeComplianceByConfigRule
+            Resource: '*'
+          - Effect: Allow
+            Action:
+            - guardduty:GetFindings
+            - guardduty:ListFindings
+            Resource: '*'
+          - Effect: Allow
+            Action:
+            - lambda:ListFunctions
+            Resource: '*'
+      - PolicyName: datalake-write
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - s3:PutObject
+            - s3:GetObject
+            Resource:
+              Fn::Sub: ${IncidentDataLake.Arn}/incidents/*
+          - Effect: Allow
+            Action:
+            - s3:GetObject
+            Resource:
+              Fn::Sub: ${IncidentDataLake.Arn}/runbooks/*
+          - Effect: Allow
+            Action:
+            - s3:ListBucket
+            Resource:
+              Fn::GetAtt:
+              - IncidentDataLake
+              - Arn
+          - Effect: Allow
+            Action:
+            - dynamodb:PutItem
+            - dynamodb:UpdateItem
+            - dynamodb:GetItem
+            - dynamodb:Query
+            Resource:
+              Fn::GetAtt:
+              - IncidentsTable
+              - Arn
+      - PolicyName: bedrock-invoke
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - bedrock:InvokeModel
+            Resource: '*'
+      - PolicyName: invoke-downstream-lambdas
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - lambda:InvokeFunction
+            Resource:
+            - Fn::Sub: arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:llm-incident-response-${Environment}-DiagnosisFunction*
+            - Fn::Sub: arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:llm-incident-response-${Environment}-NotifyFunction*
+            - Fn::Sub: arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:llm-incident-response-${Environment}-RemediationFunction*
+            - Fn::Sub: arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:llm-incident-response-${Environment}-ApprovalFunction*
+    Metadata:
+      SamResourceId: CollectorDiagnosisRole
+  RemediationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName:
+        Fn::Sub: incident-remediation-role-${Environment}
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: lambda.amazonaws.com
+          Action: sts:AssumeRole
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+      - PolicyName: remediation-read-write
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - dynamodb:GetItem
+            - dynamodb:UpdateItem
+            Resource:
+              Fn::GetAtt:
+              - IncidentsTable
+              - Arn
+          - Effect: Allow
+            Action:
+            - s3:GetObject
+            - s3:PutPublicAccessBlock
+            Resource:
+              Fn::Sub: ${IncidentDataLake.Arn}/incidents/*
+          - Effect: Allow
+            Action:
+            - cloudwatch:GetMetricStatistics
+            - cloudwatch:GetMetricData
+            - config:GetComplianceDetailsByConfigRule
+            Resource: '*'
+      - PolicyName: remediation-lambda-actions
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - lambda:GetFunctionConcurrency
+            - lambda:PutFunctionConcurrency
+            - lambda:ListFunctions
+            Resource: '*'
+          - Effect: Allow
+            Action:
+            - lambda:GetFunctionConfiguration
+            - lambda:UpdateFunctionConfiguration
+            - lambda:ListFunctions
+            Resource: '*'
+      - PolicyName: remediation-iam-actions
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - iam:PutRolePolicy
+            - iam:DeleteRolePolicy
+            - iam:ListRolePolicies
+            Resource: '*'
+      - PolicyName: invoke-verification-lambda
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - lambda:InvokeFunction
+            Resource:
+            - Fn::Sub: arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:llm-incident-response-${Environment}-VerificationFunction*
+    Metadata:
+      SamResourceId: RemediationRole
+  DemoAppRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName:
+        Fn::Sub: incident-demo-app-role-${Environment}
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: lambda.amazonaws.com
+          Action: sts:AssumeRole
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+      - PolicyName: xray-write
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - xray:PutTraceSegments
+            - xray:PutTelemetryRecords
+            Resource: '*'
+    Metadata:
+      SamResourceId: DemoAppRole
+  ServiceCFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: s3://llm-incident-response-deploy-889081505756/5f1dec08fe7a72a75ad76a2b5081d81e
+      Handler: app.lambda_handler
+      Role:
+        Fn::GetAtt:
+        - DemoAppRole
+        - Arn
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            Path: /service-c
+            Method: get
+    Metadata:
+      SamResourceId: ServiceCFunction
+  ServiceBFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: s3://llm-incident-response-deploy-889081505756/33ba91aa26a0b3e219c43d077dca187e
+      Handler: app.lambda_handler
+      Role:
+        Fn::GetAtt:
+        - DemoAppRole
+        - Arn
+      Environment:
+        Variables:
+          SERVICE_C_URL:
+            Ref: ServiceCUrl
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            Path: /service-b
+            Method: get
+    Metadata:
+      SamResourceId: ServiceBFunction
+  ServiceAFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: s3://llm-incident-response-deploy-889081505756/2e0211404e8b9ec25bd24c6612fcd9c0
+      Handler: app.lambda_handler
+      Role:
+        Fn::GetAtt:
+        - DemoAppRole
+        - Arn
+      Environment:
+        Variables:
+          SERVICE_B_URL:
+            Ref: ServiceBUrl
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            Path: /start
+            Method: get
+    Metadata:
+      SamResourceId: ServiceAFunction
+  ServiceAResourceExhaustionAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName:
+        Fn::Sub: incident-service-a-resource-exhaustion-${Environment}
+      AlarmDescription: Detects unusually long Service A Lambda executions
+      Namespace: AWS/Lambda
+      MetricName: Duration
+      Dimensions:
+      - Name: FunctionName
+        Value:
+          Ref: ServiceAFunction
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 2
+      DatapointsToAlarm: 2
+      Threshold: 50000
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+    Metadata:
+      SamResourceId: ServiceAResourceExhaustionAlarm
+  ServiceAErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName:
+        Fn::Sub: incident-service-a-errors-${Environment}
+      AlarmDescription: Detects repeated errors from Service A
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+      - Name: FunctionName
+        Value:
+          Ref: ServiceAFunction
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 2
+      DatapointsToAlarm: 2
+      Threshold: 5
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+    Metadata:
+      SamResourceId: ServiceAErrorAlarm
+  CollectorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: s3://llm-incident-response-deploy-889081505756/0c6e254e339bd5ad3bb577c50517f28d
+      Handler: app.lambda_handler
+      Role:
+        Fn::GetAtt:
+        - CollectorDiagnosisRole
+        - Arn
+      Description: Receives incident detection events, collects observability evidence,
+        writes to S3+DynamoDB, invokes diagnosis
+      Timeout: 300
+      MemorySize: 512
+      Environment:
+        Variables:
+          INCIDENTS_TABLE:
+            Ref: IncidentsTable
+          DATA_LAKE_BUCKET:
+            Ref: IncidentDataLake
+          DIAGNOSIS_FUNCTION_NAME:
+            Ref: DiagnosisFunction
+    Metadata:
+      SamResourceId: CollectorFunction
+  DiagnosisFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: s3://llm-incident-response-deploy-889081505756/3da8409ca5e1e3eb940798220b29fe47
+      Handler: app.lambda_handler
+      Role:
+        Fn::GetAtt:
+        - CollectorDiagnosisRole
+        - Arn
+      Description: Receives incident evidence, loads runbook context, calls Bedrock
+        for LLM diagnosis
+      Timeout: 120
+      MemorySize: 512
+      Environment:
+        Variables:
+          INCIDENTS_TABLE:
+            Ref: IncidentsTable
+          DATA_LAKE_BUCKET:
+            Ref: IncidentDataLake
+          BEDROCK_MODEL_ID: apac.amazon.nova-pro-v1:0
+          NOTIFY_FUNCTION_NAME:
+            Ref: NotifyFunction
+    Metadata:
+      SamResourceId: DiagnosisFunction
+  CloudWatchIncidentEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name:
+        Fn::Sub: incident-cloudwatch-detection-${Environment}
+      Description: Routes resource exhaustion alarm events to the collector
+      EventPattern:
+        source:
+        - aws.cloudwatch
+        detail-type:
+        - CloudWatch Alarm State Change
+        detail:
+          state:
+            value:
+            - ALARM
+          alarmName:
+          - Fn::Sub: incident-service-a-resource-exhaustion-${Environment}
+      Targets:
+      - Arn:
+          Fn::GetAtt:
+          - CollectorFunction
+          - Arn
+        Id: CollectorTarget
+        InputTransformer:
+          InputPathsMap:
+            alarm_name: $.detail.alarmName
+            state: $.detail.state.value
+            reason: $.detail.state.reason
+          InputTemplate: "{\n  \"source\": \"cloudwatch\",\n  \"fault_class\": \"\
+            resource_exhaustion\",\n  \"alarm_name\": <alarm_name>,\n  \"state\":\
+            \ <state>,\n  \"reason\": <reason>\n}\n"
+    Metadata:
+      SamResourceId: CloudWatchIncidentEventRule
+  CloudWatchIncidentEventPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName:
+        Ref: CollectorFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn:
+        Fn::GetAtt:
+        - CloudWatchIncidentEventRule
+        - Arn
+    Metadata:
+      SamResourceId: CloudWatchIncidentEventPermission
+  GuardDutyIncidentEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name:
+        Fn::Sub: incident-guardduty-detection-${Environment}
+      Description: Routes relevant GuardDuty findings to the collector
+      EventPattern:
+        source:
+        - aws.guardduty
+        detail-type:
+        - GuardDuty Finding
+      Targets:
+      - Arn:
+          Fn::GetAtt:
+          - CollectorFunction
+          - Arn
+        Id: GuardDutyCollectorTarget
+    Metadata:
+      SamResourceId: GuardDutyIncidentEventRule
+  GuardDutyIncidentEventPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName:
+        Ref: CollectorFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn:
+        Fn::GetAtt:
+        - GuardDutyIncidentEventRule
+        - Arn
+    Metadata:
+      SamResourceId: GuardDutyIncidentEventPermission
+  ServiceCHighLatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName:
+        Fn::Sub: incident-service-c-latency-${Environment}
+      Namespace: AWS/Lambda
+      MetricName: Duration
+      Dimensions:
+      - Name: FunctionName
+        Value:
+          Ref: ServiceCFunction
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 2
+      DatapointsToAlarm: 2
+      Threshold: 3000
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+    Metadata:
+      SamResourceId: ServiceCHighLatencyAlarm
+  ServiceCascadeCompositeAlarm:
+    Type: AWS::CloudWatch::CompositeAlarm
+    Properties:
+      AlarmName:
+        Fn::Sub: incident-service-cascade-${Environment}
+      AlarmRule:
+        Fn::Sub: ALARM("incident-service-a-errors-${Environment}") AND ALARM("incident-service-c-latency-${Environment}")
+    DependsOn:
+    - ServiceAErrorAlarm
+    - ServiceCHighLatencyAlarm
+    Metadata:
+      SamResourceId: ServiceCascadeCompositeAlarm
+  CascadeIncidentEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name:
+        Fn::Sub: incident-cascade-detection-${Environment}
+      EventPattern:
+        source:
+        - aws.cloudwatch
+        detail-type:
+        - CloudWatch Alarm State Change
+        detail:
+          state:
+            value:
+            - ALARM
+          alarmName:
+          - Fn::Sub: incident-service-cascade-${Environment}
+      Targets:
+      - Arn:
+          Fn::GetAtt:
+          - CollectorFunction
+          - Arn
+        Id: CascadeCollectorTarget
+        InputTransformer:
+          InputPathsMap:
+            alarm_name: $.detail.alarmName
+            state: $.detail.state.value
+          InputTemplate: "{\n  \"source\": \"cloudwatch\",\n  \"fault_class\": \"\
+            service_cascade\",\n  \"alarm_name\": <alarm_name>,\n  \"state\": <state>\n\
+            }\n"
+    Metadata:
+      SamResourceId: CascadeIncidentEventRule
+  CascadeIncidentEventPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName:
+        Ref: CollectorFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn:
+        Fn::GetAtt:
+        - CascadeIncidentEventRule
+        - Arn
+    Metadata:
+      SamResourceId: CascadeIncidentEventPermission
+  RemediationFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: s3://llm-incident-response-deploy-889081505756/9626bf05d112bbd94e8f149e68f1ea40
+      Handler: app.lambda_handler
+      Role:
+        Fn::GetAtt:
+        - RemediationRole
+        - Arn
+      Description: Executes the approved remediation action then async-invokes the
+        verification Lambda
+      Timeout: 300
+      MemorySize: 256
+      Environment:
+        Variables:
+          INCIDENTS_TABLE:
+            Ref: IncidentsTable
+          DATA_LAKE_BUCKET:
+            Ref: IncidentDataLake
+          VERIFICATION_FUNCTION_NAME:
+            Ref: VerificationFunction
+    Metadata:
+      SamResourceId: RemediationFunction
+  VerificationFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: s3://llm-incident-response-deploy-889081505756/bfec8c9091bf7cbe90a54fc50adfb7a6
+      Handler: app.lambda_handler
+      Role:
+        Fn::GetAtt:
+        - RemediationRole
+        - Arn
+      Description: Re-checks the original incident signal post-remediation and writes
+        verification outcome to DynamoDB
+      Timeout: 600
+      MemorySize: 256
+      Environment:
+        Variables:
+          INCIDENTS_TABLE:
+            Ref: IncidentsTable
+          DATA_LAKE_BUCKET:
+            Ref: IncidentDataLake
+    Metadata:
+      SamResourceId: VerificationFunction
+  IncidentDataLakeConfigPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket:
+        Ref: IncidentDataLake
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Sid: AWSConfigBucketPermissionsCheck
+          Effect: Allow
+          Principal:
+            Service: config.amazonaws.com
+          Action: s3:GetBucketAcl
+          Resource:
+            Fn::GetAtt:
+            - IncidentDataLake
+            - Arn
+        - Sid: AWSConfigBucketDelivery
+          Effect: Allow
+          Principal:
+            Service: config.amazonaws.com
+          Action: s3:PutObject
+          Resource:
+            Fn::Sub: ${IncidentDataLake.Arn}/AWSLogs/${AWS::AccountId}/Config/*
+          Condition:
+            StringEquals:
+              s3:x-amz-acl: bucket-owner-full-control
+    Metadata:
+      SamResourceId: IncidentDataLakeConfigPolicy
+  NotifyFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: s3://llm-incident-response-deploy-889081505756/62764b6090ab11802be3e50453cb7cca
+      Handler: app.lambda_handler
+      Role:
+        Fn::GetAtt:
+        - ReportingApprovalRole
+        - Arn
+      Description: Formats the diagnosis into a Slack message and posts it via incoming
+        webhook
+      Timeout: 30
+      Environment:
+        Variables:
+          INCIDENTS_TABLE:
+            Ref: IncidentsTable
+          DATA_LAKE_BUCKET:
+            Ref: IncidentDataLake
+          SLACK_WEBHOOK_URL_SSM:
+            Ref: SlackWebhookUrlSsm
+          APPROVAL_TOKEN_SECRET_SSM:
+            Ref: ApprovalTokenSecretSsm
+          APPROVAL_API_BASE:
+            Ref: ApprovalApiBaseUrl
+    Metadata:
+      SamResourceId: NotifyFunction
+  ApprovalFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: s3://llm-incident-response-deploy-889081505756/bdfa465de223e44d653aa3f983f733ab
+      Handler: app.lambda_handler
+      Role:
+        Fn::GetAtt:
+        - ReportingApprovalRole
+        - Arn
+      Description: Approve/reject endpoint; updates incident status and invokes remediation
+        when approved
+      Timeout: 30
+      Environment:
+        Variables:
+          INCIDENTS_TABLE:
+            Ref: IncidentsTable
+          APPROVAL_TOKEN_SECRET_SSM:
+            Ref: ApprovalTokenSecretSsm
+          REMEDIATION_FUNCTION_NAME:
+            Ref: RemediationFunction
+      Events:
+        ApprovalGet:
+          Type: Api
+          Properties:
+            Path: /approval
+            Method: get
+        ApprovalPost:
+          Type: Api
+          Properties:
+            Path: /approval
+            Method: post
+    Metadata:
+      SamResourceId: ApprovalFunction
+  ReportingApprovalRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName:
+        Fn::Sub: incident-reporting-approval-role-${Environment}
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: lambda.amazonaws.com
+          Action: sts:AssumeRole
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+      - PolicyName: incident-record-read
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - dynamodb:GetItem
+            Resource:
+              Fn::GetAtt:
+              - IncidentsTable
+              - Arn
+      - PolicyName: raw-evidence-read
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - s3:GetObject
+            Resource:
+              Fn::Sub: ${IncidentDataLake.Arn}/incidents/*
+      - PolicyName: ssm-secure-parameters
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - ssm:GetParameter
+            Resource:
+              Fn::Sub: arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SlackWebhookUrlSsm}
+          - Effect: Allow
+            Action:
+            - ssm:GetParameter
+            Resource:
+              Fn::Sub: arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${ApprovalTokenSecretSsm}
+      - PolicyName: invoke-remediation-lambda
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - lambda:InvokeFunction
+            Resource:
+            - Fn::Sub: arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:*RemediationFunction*
+    Metadata:
+      SamResourceId: ReportingApprovalRole
+  ApprovalFunctionApiPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName:
+        Ref: ApprovalFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+    Metadata:
+      SamResourceId: ApprovalFunctionApiPermission
+  DashboardApiRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName:
+        Fn::Sub: incident-dashboard-api-role-${Environment}
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: lambda.amazonaws.com
+          Action: sts:AssumeRole
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+      - PolicyName: incidents-table-read-only
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - dynamodb:GetItem
+            - dynamodb:Query
+            - dynamodb:Scan
+            Resource: arn:aws:dynamodb:*:*:table/incidents-*
+          - Effect: Deny
+            Action:
+            - dynamodb:PutItem
+            - dynamodb:UpdateItem
+            - dynamodb:DeleteItem
+            - dynamodb:BatchWriteItem
+            - dynamodb:TransactWriteItems
+            Resource: '*'
+      - PolicyName: datalake-read-only
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - s3:GetObject
+            - s3:ListBucket
+            Resource:
+            - Fn::GetAtt:
+              - IncidentDataLake
+              - Arn
+            - Fn::Sub: ${IncidentDataLake.Arn}/incidents/*
+            - Fn::Sub: ${IncidentDataLake.Arn}/runbooks/*
+            - Fn::Sub: ${IncidentDataLake.Arn}/evaluation/*
+          - Effect: Deny
+            Action:
+            - s3:PutObject
+            - s3:DeleteObject
+            - s3:PutObjectAcl
+            Resource: '*'
+    Metadata:
+      SamResourceId: DashboardApiRole
+  DashboardApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: s3://llm-incident-response-deploy-889081505756/077b3e828e30dfe1998f88480fbcb990
+      Handler: app.lambda_handler
+      Role:
+        Fn::GetAtt:
+        - DashboardApiRole
+        - Arn
+      Description: Phase 8 read-only dashboard API. Serves incident records, evidence
+        bundles, Phase 7 analytics, and runbook content. No write paths.
+      Timeout: 30
+      MemorySize: 256
+      Environment:
+        Variables:
+          INCIDENTS_TABLE:
+            Ref: IncidentsTable
+          DATA_LAKE_BUCKET:
+            Ref: IncidentDataLake
+      Events:
+        GetIncidents:
+          Type: Api
+          Properties:
+            Path: /api/incidents
+            Method: get
+        GetIncidentsOptions:
+          Type: Api
+          Properties:
+            Path: /api/incidents
+            Method: options
+        GetIncidentById:
+          Type: Api
+          Properties:
+            Path: /api/incidents/{incident_id}
+            Method: get
+        GetIncidentByIdOptions:
+          Type: Api
+          Properties:
+            Path: /api/incidents/{incident_id}
+            Method: options
+        GetEvidence:
+          Type: Api
+          Properties:
+            Path: /api/incidents/{incident_id}/evidence
+            Method: get
+        GetEvidenceOptions:
+          Type: Api
+          Properties:
+            Path: /api/incidents/{incident_id}/evidence
+            Method: options
+        GetAnalytics:
+          Type: Api
+          Properties:
+            Path: /api/analytics
+            Method: get
+        GetAnalyticsOptions:
+          Type: Api
+          Properties:
+            Path: /api/analytics
+            Method: options
+        GetRunbooks:
+          Type: Api
+          Properties:
+            Path: /api/runbooks
+            Method: get
+        GetRunbooksOptions:
+          Type: Api
+          Properties:
+            Path: /api/runbooks
+            Method: options
+        GetRunbookByFaultClass:
+          Type: Api
+          Properties:
+            Path: /api/runbooks/{fault_class}
+            Method: get
+        GetRunbookByFaultClassOptions:
+          Type: Api
+          Properties:
+            Path: /api/runbooks/{fault_class}
+            Method: options
+    Metadata:
+      SamResourceId: DashboardApiFunction
+Outputs:
+  IncidentDataLakeName:
+    Description: Name of the S3 data lake bucket
+    Value:
+      Ref: IncidentDataLake
+    Export:
+      Name:
+        Fn::Sub: ${AWS::StackName}-IncidentDataLakeName
+  IncidentsTableName:
+    Description: Name of the DynamoDB incidents table
+    Value:
+      Ref: IncidentsTable
+    Export:
+      Name:
+        Fn::Sub: ${AWS::StackName}-IncidentsTableName
+  IncidentsTableArn:
+    Description: ARN of the DynamoDB incidents table
+    Value:
+      Fn::GetAtt:
+      - IncidentsTable
+      - Arn
+    Export:
+      Name:
+        Fn::Sub: ${AWS::StackName}-IncidentsTableArn
+  ApprovalFunctionArn:
+    Description: ARN of the Phase 5 approval endpoint Lambda
+    Value:
+      Fn::GetAtt:
+      - ApprovalFunction
+      - Arn
+    Export:
+      Name:
+        Fn::Sub: ${AWS::StackName}-ApprovalFunctionArn
+  RemediationRoleArn:
+    Description: ARN of the remediation Lambda role
+    Value:
+      Fn::GetAtt:
+      - RemediationRole
+      - Arn
+  DemoAppRoleArn:
+    Description: ARN of the Phase 1 demo application role
+    Value:
+      Fn::GetAtt:
+      - DemoAppRole
+      - Arn
+  CollectorFunctionArn:
+    Description: ARN of the Phase 3 collector Lambda
+    Value:
+      Fn::GetAtt:
+      - CollectorFunction
+      - Arn
+  DiagnosisFunctionArn:
+    Description: ARN of the Phase 4 diagnosis Lambda (stub until Phase 4)
+    Value:
+      Fn::GetAtt:
+      - DiagnosisFunction
+      - Arn
+  NotifyFunctionArn:
+    Description: ARN of the Phase 5 notify (Slack reporting) Lambda
+    Value:
+      Fn::GetAtt:
+      - NotifyFunction
+      - Arn
+  RemediationFunctionArn:
+    Description: ARN of the Phase 6 remediation Lambda
+    Value:
+      Fn::GetAtt:
+      - RemediationFunction
+      - Arn
+  VerificationFunctionArn:
+    Description: ARN of the Phase 6.5 verification Lambda
+    Value:
+      Fn::GetAtt:
+      - VerificationFunction
+      - Arn
+  ApprovalUrl:
+    Description: Phase 5 approval endpoint (append ?incident_id=...&action=approve&token=...)
+    Value:
+      Fn::Sub: https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/approval
+  ServiceAUrl:
+    Description: Phase 1 entry point
+    Value:
+      Fn::Sub: https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/start
+  ServiceBUrl:
+    Description: Service B endpoint
+    Value:
+      Fn::Sub: https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/service-b
+  ServiceCUrl:
+    Description: Service C endpoint
+    Value:
+      Fn::Sub: https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/service-c
+  DashboardApiFunctionArn:
+    Description: ARN of the Phase 8 read-only dashboard API Lambda
+    Value:
+      Fn::GetAtt:
+      - DashboardApiFunction
+      - Arn
+  DashboardApiUrl:
+    Description: Phase 8 dashboard API base URL. Append /api/incidents, /api/analytics,
+      /api/runbooks etc. to call the read-only dashboard endpoints.
+    Value:
+      Fn::Sub: https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/api
+  DashboardApiRoleArn:
+    Description: ARN of the Phase 8 read-only dashboard IAM role (no write permissions)
+    Value:
+      Fn::GetAtt:
+      - DashboardApiRole
+      - Arn

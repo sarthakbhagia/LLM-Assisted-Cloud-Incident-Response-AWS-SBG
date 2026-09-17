@@ -7,7 +7,7 @@ Each function receives the full incident record and returns:
 
 Design notes:
 - All functions are Lambda-based. The demo app uses Lambda, not ECS.
-- restart_service / restart_downstream_service: bump a _RESTART_TRIGGER
+- restart_service / restart_downstream_service: bump a RESTART_TRIGGER
   env var via UpdateFunctionConfiguration to force a cold start without
   changing runtime behaviour.
 - scale_up: increase Lambda reserved concurrency via PutFunctionConcurrency.
@@ -230,14 +230,14 @@ def restart_downstream_service(incident_record: dict) -> dict:
 
 def _bump_lambda_env(function_name: str, action_key: str) -> dict:
     """
-    Shared implementation: read current env vars, set _RESTART_TRIGGER to
+    Shared implementation: read current env vars, set RESTART_TRIGGER to
     the current UTC ISO8601 timestamp, write back via UpdateFunctionConfiguration.
     """
     try:
         config_resp = _lambda_client.get_function_configuration(FunctionName=function_name)
         env_vars: dict = ((config_resp.get("Environment") or {}).get("Variables") or {}).copy()
         trigger_value = datetime.now(timezone.utc).isoformat()
-        env_vars["_RESTART_TRIGGER"] = trigger_value
+        env_vars["RESTART_TRIGGER"] = trigger_value
 
         _lambda_client.update_function_configuration(
             FunctionName=function_name,
@@ -253,7 +253,7 @@ def _bump_lambda_env(function_name: str, action_key: str) -> dict:
             "success": True,
             "action_key": action_key,
             "notes": (
-                f"Bumped _RESTART_TRIGGER env var on '{function_name}' to '{trigger_value}'. "
+                f"Bumped RESTART_TRIGGER env var on '{function_name}' to '{trigger_value}'. "
                 "Existing warm Lambda execution environments will be discarded."
             ),
         }

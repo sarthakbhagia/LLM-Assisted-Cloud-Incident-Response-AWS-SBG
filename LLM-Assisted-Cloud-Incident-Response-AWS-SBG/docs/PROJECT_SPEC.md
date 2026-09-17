@@ -32,7 +32,7 @@ Build the full pipeline for all three of these. Do not expand scope beyond these
 ## Tech Stack
 
 - **Cloud**: AWS (assume account + credits already available)
-- **LLM**: Amazon Bedrock (Claude Sonnet, via Global cross-Region inference profile — e.g. `global.anthropic.claude-sonnet-4-6` — for ap-south-1) — use `bedrock-runtime InvokeModel` via boto3
+- **LLM**: Amazon Bedrock (Nova Pro, via Global cross-Region inference profile — e.g. `apac.amazon.nova-pro-v1:0` — for ap-south-1) — use `bedrock-runtime InvokeModel` via boto3
 - **RAG**: Direct context injection, NOT Bedrock Knowledge Bases / OpenSearch Serverless. The runbook corpus is only 3 short markdown files (under 1 page each) — there is no need for a vector store. Load all 3 runbook files directly and inject the relevant one(s) into the prompt as plain text context, selected by `fault_class`. This avoids OpenSearch Serverless entirely, which has a real, documented cost floor of ~$175-700/month even when idle — pure waste for a corpus this small. Document this as a deliberate methodology choice in the paper (see "RAG vs. no-RAG" evaluation in Phase 7), not a shortcut.
 - **Compute**: AWS Lambda (Python 3.12 runtime) for all backend logic
 - **Detection**: CloudWatch Alarms, EventBridge Rules, AWS Config, Amazon GuardDuty
