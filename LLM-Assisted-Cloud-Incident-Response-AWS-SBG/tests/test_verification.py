@@ -11,8 +11,8 @@ from unittest import mock
 import helpers  # noqa: F401
 from helpers import REPO_ROOT, Fixture
 
-VERIFICATION_DIR = os.path.join(REPO_ROOT, "src", "verification")
-VERIFICATION_PATH = os.path.join(VERIFICATION_DIR, "app.py")
+VERIFICATION_DIR = os.path.join(REPO_ROOT, "backend", "verification")
+VERIFICATION_PATH = os.path.join(VERIFICATION_DIR, "verification_lambda.py")
 
 
 class TestVerificationLambda(Fixture):

@@ -11,8 +11,8 @@ from unittest import mock
 import helpers  # noqa: F401
 from helpers import REPO_ROOT, Fixture
 
-DIAGNOSIS_DIR = os.path.join(REPO_ROOT, "src", "diagnosis")
-DIAGNOSIS_PATH = os.path.join(DIAGNOSIS_DIR, "app.py")
+DIAGNOSIS_DIR = os.path.join(REPO_ROOT, "backend", "diagnosis")
+DIAGNOSIS_PATH = os.path.join(DIAGNOSIS_DIR, "diagnosis_lambda.py")
 
 
 class TestDiagnosisLambda(Fixture):

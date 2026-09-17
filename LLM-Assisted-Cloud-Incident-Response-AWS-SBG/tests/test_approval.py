@@ -23,7 +23,7 @@ from helpers import REPO_ROOT, Fixture
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-APP = os.path.join(REPO_ROOT, "src", "approval", "app.py")
+APP = os.path.join(REPO_ROOT, "backend", "approval", "approval_handler.py")
 
 SECRET = "test-secret"
 INC = "11111111-2222-3333-4444-555555555555"

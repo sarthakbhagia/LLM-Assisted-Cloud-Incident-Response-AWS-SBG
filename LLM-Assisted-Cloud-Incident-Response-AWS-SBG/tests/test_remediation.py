@@ -11,8 +11,8 @@ from unittest import mock
 import helpers  # noqa: F401
 from helpers import REPO_ROOT, Fixture
 
-REMEDIATION_DIR = os.path.join(REPO_ROOT, "src", "remediation")
-REMEDIATION_PATH = os.path.join(REMEDIATION_DIR, "app.py")
+REMEDIATION_DIR = os.path.join(REPO_ROOT, "backend", "remediation")
+REMEDIATION_PATH = os.path.join(REMEDIATION_DIR, "remediation_lambda.py")
 
 
 class TestRemediationLambda(Fixture):

@@ -11,7 +11,7 @@ from unittest import mock
 import helpers  # noqa: F401
 from helpers import REPO_ROOT, Fixture
 
-COLLECTOR_PATH = os.path.join(REPO_ROOT, "src", "collector", "app.py")
+COLLECTOR_PATH = os.path.join(REPO_ROOT, "backend", "collector", "collector_lambda.py")
 
 
 class TestCollectorLambda(Fixture):

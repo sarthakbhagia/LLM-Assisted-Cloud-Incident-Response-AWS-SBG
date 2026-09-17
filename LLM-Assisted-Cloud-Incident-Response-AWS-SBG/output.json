@@ -1,1 +1,0 @@
-{"output":{"message":{"content":[{"text":"It looks like you might want to run a test"}],"role":"assistant"}},"stopReason":"max_tokens","usage":{"inputTokens":1,"outputTokens":10,"totalTokens":11,"cacheReadInputTokenCount":0,"cacheWriteInputTokenCount":0}}

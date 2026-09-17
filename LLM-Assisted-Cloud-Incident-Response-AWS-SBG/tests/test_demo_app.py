@@ -11,9 +11,9 @@ from unittest import mock
 import helpers  # noqa: F401
 from helpers import REPO_ROOT, Fixture
 
-SERVICE_A_PATH = os.path.join(REPO_ROOT, "src", "service_a", "app.py")
-SERVICE_B_PATH = os.path.join(REPO_ROOT, "src", "service_b", "app.py")
-SERVICE_C_PATH = os.path.join(REPO_ROOT, "src", "service_c", "app.py")
+SERVICE_A_PATH = os.path.join(REPO_ROOT, "backend", "service_a", "app.py")
+SERVICE_B_PATH = os.path.join(REPO_ROOT, "backend", "service_b", "app.py")
+SERVICE_C_PATH = os.path.join(REPO_ROOT, "backend", "service_c", "app.py")
 
 
 class TestServiceC(Fixture):

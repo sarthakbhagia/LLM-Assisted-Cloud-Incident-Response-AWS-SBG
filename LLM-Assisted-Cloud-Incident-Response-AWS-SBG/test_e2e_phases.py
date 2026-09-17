@@ -252,7 +252,7 @@ class E2ETestRunner:
                 
                 # Check if actions.py exists and has remediation actions
                 try:
-                    with open('src/remediation/actions.py', 'r') as f:
+                    with open('backend/remediation/actions.py', 'r') as f:
                         content = f.read()
                         required_actions = ['scale_up', 'restart_service', 'lock_s3_bucket', 'tighten_iam_policy']
                         actions_implemented = all(action in content for action in required_actions)
