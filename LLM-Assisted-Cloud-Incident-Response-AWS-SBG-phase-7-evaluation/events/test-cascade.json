@@ -1,6 +1,0 @@
-{
-  "source": "cloudwatch",
-  "fault_class": "service_cascade",
-  "alarm_name": "incident-service-cascade-dev",
-  "state": "ALARM"
-}

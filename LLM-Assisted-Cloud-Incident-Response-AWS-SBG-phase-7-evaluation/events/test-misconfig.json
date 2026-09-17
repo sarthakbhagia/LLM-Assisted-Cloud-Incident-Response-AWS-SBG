@@ -1,7 +1,0 @@
-{
-  "source": "aws_config",
-  "fault_class": "misconfiguration",
-  "config_rule": "incident-public-s3-dev",
-  "resource_type": "AWS::S3::Bucket",
-  "resource_id": "test-public-bucket"
-}

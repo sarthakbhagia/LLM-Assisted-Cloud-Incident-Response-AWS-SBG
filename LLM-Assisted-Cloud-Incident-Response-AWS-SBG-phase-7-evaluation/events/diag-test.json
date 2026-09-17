@@ -1,5 +1,0 @@
-{
-  "incident_id": "2d68a242-482b-4a2f-b634-126047a60ebd",
-  "fault_class": "resource_exhaustion",
-  "raw_data_s3_key": "incidents/2d68a242-482b-4a2f-b634-126047a60ebd/raw_data.json"
-}
