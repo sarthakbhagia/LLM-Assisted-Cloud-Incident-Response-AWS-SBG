@@ -54,6 +54,13 @@ Parameters:
       https://<api-id>.execute-api.<region>.amazonaws.com/Prod/approval.
       Leave empty to omit approval links from Slack messages.
 
+  BedrockModelId:
+    Type: String
+    Default: "apac.amazon.nova-pro-v1:0"
+    Description: >
+      Bedrock model ID to use for diagnosis. Must be available in the deployment region.
+      Examples: apac.amazon.nova-pro-v1:0 (ap-south-1), anthropic.claude-3-5-sonnet-20240620-v1:0, meta.llama3-70b-instruct-v1:0
+
 Resources:
 
   # ---------------------------------------------------------------------------
@@ -312,7 +319,7 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       CodeUri: ../backend/service_c/
-      Handler: diagnosis_lambda.lambda_handler
+      Handler: app.lambda_handler
       Role: !GetAtt DemoAppRole.Arn
       Events:
         Api:
@@ -328,7 +335,7 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       CodeUri: ../backend/service_b/
-      Handler: diagnosis_lambda.lambda_handler
+      Handler: app.lambda_handler
       Role: !GetAtt DemoAppRole.Arn
       Environment:
         Variables:
@@ -347,7 +354,7 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       CodeUri: ../backend/service_a/
-      Handler: diagnosis_lambda.lambda_handler
+      Handler: app.lambda_handler
       Role: !GetAtt DemoAppRole.Arn
       Environment:
         Variables:
@@ -413,7 +420,7 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       CodeUri: ../backend/collector/
-      Handler: diagnosis_lambda.lambda_handler
+      Handler: collector_lambda.lambda_handler
       Role: !GetAtt CollectorDiagnosisRole.Arn
       Description: Receives incident detection events, collects observability evidence, writes to S3+DynamoDB, invokes diagnosis
       Timeout: 300
@@ -437,7 +444,7 @@ Resources:
         Variables:
           INCIDENTS_TABLE: !Ref IncidentsTable
           DATA_LAKE_BUCKET: !Ref IncidentDataLake
-          BEDROCK_MODEL_ID: "apac.amazon.nova-pro-v1:0"
+          BEDROCK_MODEL_ID: !Ref BedrockModelId
           NOTIFY_FUNCTION_NAME: !Ref NotifyFunction
 
   # ---------------------------------------------------------------------------
@@ -645,7 +652,7 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       CodeUri: ../backend/reporting/
-      Handler: diagnosis_lambda.lambda_handler
+      Handler: notify_lambda.lambda_handler
       Role: !GetAtt ReportingApprovalRole.Arn
       Description: Formats the diagnosis into a Slack message and posts it via incoming webhook
       Timeout: 30
@@ -813,7 +820,7 @@ Resources:
   DashboardApiFunction:
     Type: AWS::Serverless::Function
     Properties:
-      CodeUri: ../backend/dashboard/
+      CodeUri: ../backend/dashboard_api/
       Handler: dashboard_api_lambda.lambda_handler
       Role: !GetAtt DashboardApiRole.Arn
       Description: >-
@@ -893,6 +900,13 @@ Resources:
 #       FunctionName: !Ref DashboardApiFunction
 #       Action: lambda:InvokeFunction
 #       Principal: apigateway.amazonaws.com
+
+  DashboardApiFunctionApiPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref DashboardApiFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
 
 
 # =============================================================================

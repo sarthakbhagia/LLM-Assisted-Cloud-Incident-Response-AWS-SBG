@@ -5,3 +5,6 @@ __pycache__/
 .freebuff/
 dashboard/web/.env
 dashboard/web/node_modules/
+env.json
+.env
+*.env

@@ -40,12 +40,18 @@ def calculate_mttr(detected_at: str | None, executed_at: str | None) -> float | 
 
 
 def evaluate_rca_accuracy(record: Dict[str, Any]) -> bool:
-    """Evaluate whether the diagnosis root cause matches the ground truth fault class."""
+    """Evaluate whether the diagnosis root cause matches the ground truth fault class.
+    
+    Returns False for parse_failed diagnoses.
+    """
+    diagnosis = record.get("diagnosis", {})
+    if diagnosis.get("diagnosis_status") == "parse_failed":
+        return False
+    
     ground_truth = record.get("ground_truth", {}).get("true_fault_class") or record.get("fault_class")
     if not ground_truth:
         return False
 
-    diagnosis = record.get("diagnosis", {})
     suggested_action = diagnosis.get("suggested_action")
     root_cause = (diagnosis.get("root_cause") or "").lower()
 
@@ -124,6 +130,8 @@ def compute_aggregate_metrics(records: List[Dict[str, Any]], raw_data_map: Dict[
             "rca_accuracy_pct": 0.0,
             "hallucination_rate_pct": 0.0,
             "diagnosis_recovery_gap_pct": 0.0,
+            "parse_failed_count": 0,
+            "parse_failed_pct": 0.0,
             "failure_taxonomy": {},
             "rag_ablation_comparison": {},
         }
@@ -133,6 +141,7 @@ def compute_aggregate_metrics(records: List[Dict[str, Any]], raw_data_map: Dict[
     hallucination_count = 0
     gap_count = 0
     high_confidence_count = 0
+    parse_failed_count = 0
     failure_taxonomy: Dict[str, int] = {}
     evaluated_runs: List[Dict[str, Any]] = []
 
@@ -150,7 +159,11 @@ def compute_aggregate_metrics(records: List[Dict[str, Any]], raw_data_map: Dict[
         if mttr is not None:
             mttr_list.append(mttr)
 
-        # RCA Accuracy
+        # Track parse_failed diagnoses
+        if rec.get("diagnosis", {}).get("diagnosis_status") == "parse_failed":
+            parse_failed_count += 1
+
+        # RCA Accuracy (returns False for parse_failed)
         is_correct = evaluate_rca_accuracy(rec)
         if is_correct:
             rca_correct_count += 1
@@ -188,6 +201,7 @@ def compute_aggregate_metrics(records: List[Dict[str, Any]], raw_data_map: Dict[
             "used_rag": used_rag,
             "rca_correct": is_correct,
             "hallucinated": is_hallucinated,
+            "diagnosis_status": rec.get("diagnosis", {}).get("diagnosis_status", "success"),
             "mttr_seconds": mttr if mttr is not None else "",
             "verification_status": verif_status,
             "failure_mode": f_mode,
@@ -197,6 +211,7 @@ def compute_aggregate_metrics(records: List[Dict[str, Any]], raw_data_map: Dict[
     rca_acc = round((rca_correct_count / total_incidents) * 100, 2)
     hallucination_rate = round((hallucination_count / total_incidents) * 100, 2)
     diag_gap_pct = round((gap_count / high_confidence_count) * 100, 2) if high_confidence_count > 0 else 0.0
+    parse_failed_pct = round((parse_failed_count / total_incidents) * 100, 2)
 
     # RAG Ablation Summary
     rag_true_acc = round(sum(1 for c, _ in rag_true_records if c) / len(rag_true_records) * 100, 2) if rag_true_records else 0.0
@@ -208,6 +223,8 @@ def compute_aggregate_metrics(records: List[Dict[str, Any]], raw_data_map: Dict[
         "rca_accuracy_pct": rca_acc,
         "hallucination_rate_pct": hallucination_rate,
         "diagnosis_recovery_gap_pct": diag_gap_pct,
+        "parse_failed_count": parse_failed_count,
+        "parse_failed_pct": parse_failed_pct,
         "high_confidence_incidents": high_confidence_count,
         "unresolved_high_confidence_incidents": gap_count,
         "failure_taxonomy": failure_taxonomy,

@@ -5,7 +5,7 @@ know anything about AWS or "serverless" to read this — we'll explain everythin
 as we go.
 
 The full engineering spec lives in
-[`PROJECT_SPEC.md`](PROJECT_SPEC.md). Read that once you're comfortable here.
+[`docs/PROJECT_SPEC.md`](docs/PROJECT_SPEC.md). Read that once you're comfortable here.
 
 ---
 
@@ -85,33 +85,30 @@ think of it as renting computers and utilities instead of buying your own.
 
 ```
 LLM-Assisted-Cloud-Incident-Response-AWS-SBG/
-├── infra/
-│   ├── template.yaml              # SAM template: all AWS resources (Lambdas, DynamoDB, S3, Alarms, Config)
-│   └── samconfig.toml             # SAM deployment defaults
-├── src/
+├── backend/                       # All Lambda function code
 │   ├── service_a/app.py           # Phase 1: Entry point /start, calls Service B
 │   ├── service_b/app.py           # Phase 1: /service-b, calls Service C
 │   ├── service_c/app.py           # Phase 1: /service-c
-│   ├── collector/app.py           # Phase 3: Gathers telemetry evidence (collector_lambda)
+│   ├── collector/collector_lambda.py   # Phase 3: Gathers telemetry evidence
 │   ├── diagnosis/                 # Phase 4: Bedrock LLM diagnosis + prompt templates + runbook loader
-│   │   ├── app.py
+│   │   ├── diagnosis_lambda.py
 │   │   ├── prompts.py
 │   │   └── runbook_loader.py
-│   ├── reporting/app.py           # Phase 5: Formats diagnosis into Slack messages (notify_lambda)
-│   ├── approval/app.py            # Phase 5: Approve/Reject API handler (approval_handler)
-│   ├── remediation/               # Phase 6: Executes approved fix (remediation_lambda + actions)
-│   │   ├── app.py
+│   ├── reporting/notify_lambda.py # Phase 5: Formats diagnosis into Slack messages
+│   ├── approval/approval_handler.py # Phase 5: Approve/Reject API handler
+│   ├── remediation/               # Phase 6: Executes approved fix
+│   │   ├── remediation_lambda.py
 │   │   └── actions.py
-│   └── verification/app.py        # Phase 6.5: Closed-loop verification post-remediation
+│   ├── verification/verification_lambda.py # Phase 6.5: Closed-loop verification
+│   └── dashboard_api/dashboard_api_lambda.py # Phase 8: Read-only dashboard API
+├── infra/
+│   ├── template.yaml              # SAM template: all AWS resources (Lambdas, DynamoDB, S3, Alarms, Config)
+│   └── samconfig.toml             # SAM deployment defaults
 ├── knowledge_base/                # Runbook procedural markdown files for context injection
 │   ├── resource_exhaustion.md
 │   ├── misconfiguration.md
 │   └── service_cascade.md
-├── events/                        # Sample EventBridge & Lambda test payloads
-│   ├── test-detection.json
-│   ├── test-notify.json
-│   └── test-approval.json
-├── tests/                         # Comprehensive unit test suite (47 tests across all phases)
+├── tests/                         # Unit test suite (56 tests across all phases)
 │   ├── helpers.py                 # Shared test scaffolding with boto3 stubs
 │   ├── test_demo_app.py           # Phase 1 unit tests
 │   ├── test_collector.py          # Phase 3 unit tests
@@ -119,10 +116,32 @@ LLM-Assisted-Cloud-Incident-Response-AWS-SBG/
 │   ├── test_notify.py             # Phase 5 notify unit tests
 │   ├── test_approval.py           # Phase 5 approval unit tests
 │   ├── test_remediation.py        # Phase 6 remediation unit tests
-│   └── test_verification.py       # Phase 6.5 verification unit tests
-├── iam_permissions_required.md    # IAM permissions guide for CloudFormation deployers
-├── PROJECT_SPEC.md                # Full engineering specification & research novelty doc
-└── README.md                      # Onboarding guide & project architecture
+│   ├── test_verification.py       # Phase 6.5 verification unit tests
+│   └── test_evaluation.py         # Phase 7 evaluation & fault injection tests
+├── tests/integration/             # End-to-end integration tests (require deployed AWS env)
+│   ├── test_e2e_phases.py         # Phase-by-phase validation of deployed stack
+│   ├── test_full_incident_flow.py # Full incident pipeline simulation
+│   └── README.md                  # Prerequisites & usage
+├── evaluation/                    # Phase 7: Benchmarking & metrics
+│   ├── run_evaluation.py          # CLI runner (supports --mock for offline testing)
+│   ├── metrics.py                 # MTTR, RCA accuracy, hallucination rate, diagnosis-recovery gap
+│   └── results/                   # CSV/JSON output artifacts (gitignored)
+├── fault_injection/               # Phase 7: Fault injection scripts (dry-run supported)
+│   ├── inject_resource_exhaustion.py
+│   ├── inject_misconfiguration.py
+│   └── inject_service_cascade.py
+├── frontend/                      # Phase 8: React + Vite dashboard UI
+│   ├── src/                       # React components, pages, API client
+│   ├── package.json
+│   └── .env.example               # VITE_API_BASE_URL, VITE_DEMO_API_BASE_URL
+├── docs/                          # Detailed specifications
+│   ├── PROJECT_SPEC.md            # Full engineering specification & research novelty doc
+│   ├── DESIGN_SPEC.md
+│   ├── BACKEND_SPEC.md
+│   ├── FRONTEND_SPEC.md
+│   └── ... (phase handoff docs)
+├── env.example.json               # Example environment config (no secrets)
+└── README.md                      # This file
 ```
 
 ---
@@ -282,8 +301,8 @@ To switch the reporting/approval flow on:
 4. **Local tests** (no AWS calls needed for notify without the webhook param):
    ```bash
    sam local invoke NotifyFunction --event events/test-notify.json
-   # approval: token = HMAC-SHA256(secret, incident_id) hex:
-   echo -n '<incident_id>' | openssl dgst -sha256 -hmac '<secret>'
+   # approval: token = HMAC-SHA256(secret, incident_id:action) hex:
+   echo -n '<incident_id>:approve' | openssl dgst -sha256 -hmac '<secret>'
    sam local invoke ApprovalFunction --event events/test-approval.json
    ```
 
@@ -291,10 +310,17 @@ To switch the reporting/approval flow on:
    ```bash
    python3 -m unittest discover -s tests
    ```
-   47 tests covering all handlers with mocked boto3: approve/reject
+   56 tests covering all handlers with mocked boto3: approve/reject
    happy paths, bad/missing token, already-processed conflicts (409),
    malformed requests, Slack/SSM/DynamoDB failure degradation, and the
    signed-approval-link construction. Runs on plain Python 3.9+.
+
+6. **Integration tests** (require deployed AWS environment):
+   ```bash
+   python3 -m pytest tests/integration/test_e2e_phases.py
+   python3 -m pytest tests/integration/test_full_incident_flow.py
+   ```
+   See `tests/integration/README.md` for prerequisites.
 
 ---
 
@@ -305,13 +331,14 @@ what's yours.
 
 | Workstream | What you own | Where to look |
 |---|---|---|
-| **Detection & data pipeline** | Alarms/rules that detect problems + the collector that gathers evidence | `infra/template.yaml`, `src/collector/` |
-| **LLM reasoning core** | Prompts, diagnosis logic, and the runbook knowledge the model learns from | `src/diagnosis/`, `knowledge_base/` |
-| **Remediation & verification** | Scoped actions that fix issues & post-fix signal verification | `src/remediation/`, `src/verification/` |
-| **ChatOps / interface** | Slack reporting + the approve/reject flow | `src/reporting/`, `src/approval/` |
+| **Detection & data pipeline** | Alarms/rules that detect problems + the collector that gathers evidence | `infra/template.yaml`, `backend/collector/` |
+| **LLM reasoning core** | Prompts, diagnosis logic, and the runbook knowledge the model learns from | `backend/diagnosis/`, `knowledge_base/` |
+| **Remediation & verification** | Scoped actions that fix issues & post-fix signal verification | `backend/remediation/`, `backend/verification/` |
+| **ChatOps / interface** | Slack reporting + the approve/reject flow | `backend/reporting/`, `backend/approval/` |
 | **Evaluation & benchmarking** | Breaking things on purpose and scoring accuracy/speed | `fault_injection/`, `evaluation/` |
+| **Presentation dashboard** | Read-only visualization API & React Web UI | `backend/dashboard_api/`, `frontend/` |
 | **Paper / docs** | Architecture writeups, methodology, data schema docs | `docs/`, `README.md` |
 
 ---
 
-*Questions? The spec in `PROJECT_SPEC.md` is the source of truth. When in doubt, read that first.*
+*Questions? The spec in `docs/PROJECT_SPEC.md` is the source of truth. When in doubt, read that first.*

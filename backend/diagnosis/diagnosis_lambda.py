@@ -47,6 +47,9 @@ SECOND_FALLBACK_MODEL_ID = "mistral.mistral-large-2402-v1:0"
 NOVA_FALLBACK_MODEL_ID = "apac.amazon.nova-micro-v1:0"
 NOTIFY_FUNCTION_NAME = os.environ.get("NOTIFY_FUNCTION_NAME", "")
 
+# Increased max tokens for models to reduce truncation
+MAX_TOKENS = 2048
+
 
 NOVA_SYSTEM_PROMPT = """You are an AWS incident diagnosis expert. Output ONLY a raw JSON object with these EXACT fields:
 - root_cause: string
@@ -62,7 +65,8 @@ Rules:
 - NO comments
 - confidence must be a NUMBER not a string
 - reasoning_trace must be a STRING not an array
-- suggested_action must match one of the 6 exact values above"""
+- suggested_action must match one of the 6 exact values above
+- Output must be complete and valid JSON — do not truncate."""
 
 LLAMA_SYSTEM_PROMPT = f"""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
 {SYSTEM_PROMPT}
@@ -105,6 +109,7 @@ def lambda_handler(event, context):
         user_prompt=user_prompt,
         fault_class=fault_class,
         raw_data=raw_data,
+        incident_id=incident_id,
     )
 
     # 5. Update DynamoDB IncidentRecord
@@ -138,38 +143,97 @@ def _invoke_llm_with_validation(
     user_prompt: str,
     fault_class: str,
     raw_data: dict,
+    incident_id: str | None = None,
 ) -> tuple[dict, str | None]:
-    """Call Bedrock LLM, parse & validate JSON diagnosis, retry once if malformed."""
+    """Call Bedrock LLM, parse & validate JSON diagnosis, retry once if malformed.
+    
+    On final parse failure, stores raw response in S3 and returns parse_failed diagnosis.
+    """
     raw_response = None
     failure_mode = None
 
-    try:
-        raw_response = _call_bedrock(user_prompt)
-        logger.info(f"Raw LLM response (first 500 chars): {str(raw_response)[:500]}")
-        validated_diag = _parse_and_validate_json(raw_response)
+    def _save_raw_response_to_s3(response_text: str, error_type: str) -> str | None:
+        """Save raw LLM response to S3 for debugging. Returns S3 key or None on failure."""
+        if not incident_id or not DATA_LAKE_BUCKET:
+            return None
+        try:
+            s3_key = f"incidents/{incident_id}/llm_raw_response_{error_type}.json"
+            _s3.put_object(
+                Bucket=DATA_LAKE_BUCKET,
+                Key=s3_key,
+                Body=json.dumps({
+                    "incident_id": incident_id,
+                    "error_type": error_type,
+                    "raw_response": response_text,
+                    "prompt_length": len(user_prompt),
+                }, indent=2, default=str),
+                ContentType="application/json",
+            )
+            logger.info(f"Saved raw LLM response to S3: {s3_key}")
+            return s3_key
+        except Exception as e:
+            logger.error(f"Failed to save raw response to S3: {e}")
+            return None
+
+    def _attempt_llm_call(prompt: str, attempt_name: str) -> tuple[str | None, str | None, str | None]:
+        """Attempt LLM call and validation. Returns (validated_diag, raw_response, failure_mode)."""
+        raw_resp = None
+        try:
+            raw_resp, stop_reason, is_truncated = _call_bedrock(prompt)
+            logger.info(f"{attempt_name} LLM response (first 500 chars): {str(raw_resp)[:500]}, stop_reason: {stop_reason}, truncated: {is_truncated}")
+            
+            if is_truncated:
+                failure = f"{attempt_name.lower()}_truncated: stop_reason={stop_reason}"
+                s3_key = _save_raw_response_to_s3(str(raw_resp), f"{attempt_name.lower()}_truncated")
+                if s3_key:
+                    failure += f"; raw_saved_to_s3:{s3_key}"
+                return None, raw_resp, failure
+            
+            validated_diag = _parse_and_validate_json(raw_resp)
+            return validated_diag, raw_resp, None
+        except ValueError as exc:
+            failure = None
+            if "truncated" in str(exc).lower():
+                failure = f"{attempt_name.lower()}_truncated: {exc}"
+                s3_key = _save_raw_response_to_s3(str(raw_resp), f"{attempt_name.lower()}_truncated")
+                if s3_key:
+                    failure += f"; raw_saved_to_s3:{s3_key}"
+            else:
+                failure = f"{attempt_name.lower()}_validation_error: {exc}"
+            return None, raw_resp, failure
+        except Exception as exc:  # noqa: BLE001
+            return None, raw_resp, f"{attempt_name.lower()}_error: {exc}"
+
+    # Attempt 1: Initial call
+    validated_diag, raw_response, failure_mode = _attempt_llm_call(user_prompt, "Initial")
+    if validated_diag is not None:
         return validated_diag, None
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(f"Initial LLM response invalid or failed: {exc}. Raw response: {str(raw_response)[:500]}. Retrying once...")
-        failure_mode = f"validation_error: {exc}"
 
-        if raw_response:
-            correction_prompt = build_error_correction_prompt(raw_response, str(exc))
-            try:
-                second_response = _call_bedrock(correction_prompt)
-                logger.info(f"Retry LLM response (first 500 chars): {str(second_response)[:500]}")
-                validated_diag = _parse_and_validate_json(second_response)
-                return validated_diag, "retry_succeeded"
-            except Exception as retry_exc:  # noqa: BLE001
-                logger.error(f"Retry LLM invocation failed: {retry_exc}")
-                failure_mode = f"retry_failed: {retry_exc}"
+    # Attempt 2: Retry with correction prompt (if we got a raw response)
+    if raw_response:
+        correction_prompt = build_error_correction_prompt(raw_response, failure_mode or "unknown error")
+        validated_diag, second_response, retry_failure = _attempt_llm_call(correction_prompt, "Retry")
+        if validated_diag is not None:
+            return validated_diag, "retry_succeeded"
+        if retry_failure:
+            failure_mode = retry_failure
+            # Save retry raw response if different from initial
+            if second_response and second_response != raw_response:
+                s3_key = _save_raw_response_to_s3(str(second_response), "retry_" + failure_mode.split(":")[0])
+                if s3_key:
+                    failure_mode += f"; raw_saved_to_s3:{s3_key}"
 
-    # Fallback heuristic diagnosis if Bedrock is unreachable / unconfigured
+    # Fallback heuristic diagnosis if Bedrock is unreachable / unconfigured / parse failed
     fallback_diag = _generate_fallback_diagnosis(fault_class, raw_data)
+    fallback_diag["diagnosis_status"] = "parse_failed"
     return fallback_diag, failure_mode or "fallback_heuristic_used"
 
 
-def _call_bedrock(prompt: str) -> str:
-    """Invoke Bedrock model with fallback chain: Nova Pro -> Llama 3 70B -> Mistral Large -> Nova Micro."""
+def _call_bedrock(prompt: str) -> tuple[str, str | None, bool]:
+    """Invoke Bedrock model with fallback chain: Nova Pro -> Llama 3 70B -> Mistral Large -> Nova Micro.
+    
+    Returns (text, stop_reason, is_truncated).
+    """
     logger.info(f"_call_bedrock invoked with prompt length: {len(prompt)}")
     logger.info("_call_bedrock: Starting execution")
 
@@ -178,22 +242,23 @@ def _call_bedrock(prompt: str) -> str:
             {"role": "user", "content": [{"text": NOVA_SYSTEM_PROMPT}]},
             {"role": "user", "content": [{"text": prompt}]}
         ],
-        "inferenceConfig": {"maxTokens": 1024, "temperature": 0.1},
+        "inferenceConfig": {"maxTokens": MAX_TOKENS, "temperature": 0.1},
     }
 
     llama_payload = {
         "prompt": LLAMA_SYSTEM_PROMPT.format(prompt=prompt),
-        "max_gen_len": 1024,
+        "max_gen_len": MAX_TOKENS,
         "temperature": 0.1,
     }
 
     mistral_payload = {
         "prompt": MISTRAL_SYSTEM_PROMPT.format(prompt=prompt),
-        "max_tokens": 1024,
+        "max_tokens": MAX_TOKENS,
         "temperature": 0.1,
     }
 
-    def _invoke_nova(model_id: str) -> str:
+    def _invoke_nova(model_id: str) -> tuple[str, str | None]:
+        """Invoke Nova model and return (text, stop_reason)."""
         logger.info(f"Invoking Nova model: {model_id}")
         try:
             response = _bedrock.invoke_model(
@@ -206,6 +271,8 @@ def _call_bedrock(prompt: str) -> str:
             logger.info(f"Nova response body keys: {list(response_body.keys())}")
             output = response_body.get("output", {})
             logger.info(f"Nova output keys: {list(output.keys()) if output else 'None'}")
+            stop_reason = output.get("stopReason")
+            logger.info(f"Nova stopReason: {stop_reason}")
             message = output.get("message", {})
             logger.info(f"Nova message keys: {list(message.keys()) if message else 'None'}")
             content = message.get("content", [])
@@ -213,14 +280,15 @@ def _call_bedrock(prompt: str) -> str:
             if content and isinstance(content, list):
                 text = content[0].get("text", "")
                 logger.info(f"Nova text (first 200): {text[:200]}")
-                return text
+                return text, stop_reason
             logger.warning(f"Nova unexpected response format: {response_body}")
-            return str(response_body)
+            return str(response_body), stop_reason
         except Exception as e:
             logger.error(f"Nova invocation failed with {type(e).__name__}: {e}")
             raise
 
-    def _invoke_llama(model_id: str) -> str:
+    def _invoke_llama(model_id: str) -> tuple[str, str | None]:
+        """Invoke Llama model and return (text, stop_reason)."""
         logger.info(f"Invoking Llama model: {model_id}")
         try:
             response = _bedrock.invoke_model(
@@ -230,12 +298,15 @@ def _call_bedrock(prompt: str) -> str:
                 accept="application/json",
             )
             response_body = json.loads(response["body"].read().decode("utf-8"))
-            return response_body.get("generation", "")
+            stop_reason = response_body.get("stop_reason")
+            logger.info(f"Llama stop_reason: {stop_reason}")
+            return response_body.get("generation", ""), stop_reason
         except Exception as e:
             logger.error(f"Llama invocation failed with {type(e).__name__}: {e}")
             raise
 
-    def _invoke_mistral(model_id: str) -> str:
+    def _invoke_mistral(model_id: str) -> tuple[str, str | None]:
+        """Invoke Mistral model and return (text, stop_reason)."""
         logger.info(f"Invoking Mistral model: {model_id}")
         try:
             response = _bedrock.invoke_model(
@@ -246,20 +317,24 @@ def _call_bedrock(prompt: str) -> str:
             )
             response_body = json.loads(response["body"].read().decode("utf-8"))
             outputs = response_body.get("outputs", [])
+            stop_reason = None
             if outputs and isinstance(outputs, list):
-                return outputs[0].get("text", "")
-            return str(response_body)
+                stop_reason = outputs[0].get("stop_reason")
+            logger.info(f"Mistral stop_reason: {stop_reason}")
+            if outputs and isinstance(outputs, list):
+                return outputs[0].get("text", ""), stop_reason
+            return str(response_body), stop_reason
         except Exception as e:
             logger.error(f"Mistral invocation failed with {type(e).__name__}: {e}")
             raise
 
-    def _try_model(model_id: str, invoke_fn, model_name: str, next_model: str | None = None):
+    def _try_model(model_id: str, invoke_fn, model_name: str, next_model: str | None = None) -> tuple[str, str | None]:
         logger.info(f"_try_model called for {model_name}")
         try:
             logger.info(f"Trying model: {model_name} ({model_id})")
-            result = invoke_fn(model_id)
-            logger.info(f"Model {model_name} returned: {type(result)}")
-            return result
+            result, stop_reason = invoke_fn(model_id)
+            logger.info(f"Model {model_name} returned: {type(result)}, stop_reason: {stop_reason}")
+            return result, stop_reason
         except ClientError as exc:
             error_code = exc.response.get("Error", {}).get("Code", "")
             if error_code == "AccessDeniedException" and "INVALID_PAYMENT_INSTRUMENT" in str(exc):
@@ -280,36 +355,51 @@ def _call_bedrock(prompt: str) -> str:
     logger.info("About to try Nova Pro")
     try:
         logger.info("Attempt 1: Nova Pro")
-        result = _try_model(BEDROCK_MODEL_ID, _invoke_nova, "Nova Pro", FALLBACK_MODEL_ID)
-        logger.info(f"Nova Pro attempt returned: {result[:100] if result else 'None'}")
-        return result
+        result, stop_reason = _try_model(BEDROCK_MODEL_ID, _invoke_nova, "Nova Pro", FALLBACK_MODEL_ID)
+        logger.info(f"Nova Pro attempt returned: {result[:100] if result else 'None'}, stop_reason: {stop_reason}")
+        is_truncated = stop_reason in ("max_tokens", "length")
+        if is_truncated:
+            logger.warning(f"Nova Pro output truncated (stop_reason={stop_reason})")
+        return result, stop_reason, is_truncated
     except ClientError as e:
         logger.warning(f"Nova Pro failed with ClientError: {e}")
         pass
 
     try:
         logger.info("Attempt 2: Llama 3 70B")
-        result = _try_model(FALLBACK_MODEL_ID, _invoke_llama, "Llama 3 70B", SECOND_FALLBACK_MODEL_ID)
-        logger.info(f"Llama attempt returned: {result[:100] if result else 'None'}")
-        return result
+        result, stop_reason = _try_model(FALLBACK_MODEL_ID, _invoke_llama, "Llama 3 70B", SECOND_FALLBACK_MODEL_ID)
+        logger.info(f"Llama attempt returned: {result[:100] if result else 'None'}, stop_reason: {stop_reason}")
+        is_truncated = stop_reason in ("max_tokens", "length", "stop")
+        if is_truncated:
+            logger.warning(f"Llama output truncated (stop_reason={stop_reason})")
+        return result, stop_reason, is_truncated
     except ClientError as e:
         logger.warning(f"Llama failed with ClientError: {e}")
         pass
 
     try:
         logger.info("Attempt 3: Mistral Large")
-        result = _try_model(SECOND_FALLBACK_MODEL_ID, _invoke_mistral, "Mistral Large", NOVA_FALLBACK_MODEL_ID)
-        logger.info(f"Mistral attempt returned: {result[:100] if result else 'None'}")
-        return result
+        result, stop_reason = _try_model(SECOND_FALLBACK_MODEL_ID, _invoke_mistral, "Mistral Large", NOVA_FALLBACK_MODEL_ID)
+        logger.info(f"Mistral attempt returned: {result[:100] if result else 'None'}, stop_reason: {stop_reason}")
+        is_truncated = stop_reason in ("max_tokens", "length")
+        if is_truncated:
+            logger.warning(f"Mistral output truncated (stop_reason={stop_reason})")
+        return result, stop_reason, is_truncated
     except ClientError as e:
         logger.warning(f"Mistral failed with ClientError: {e}")
         pass
 
     try:
         logger.info("Attempt 4: Nova Micro")
-        result = _try_model(NOVA_FALLBACK_MODEL_ID, _invoke_nova, "Nova Micro", None)
-        logger.info(f"Nova Micro attempt returned: {result[:100] if result else 'None'}")
-        return result
+        result, stop_reason = _try_model(NOVA_FALLBACK_MODEL_ID, _invoke_nova, "Nova Micro", None)
+        logger.info(f"Nova Micro attempt returned: {result[:100] if result else 'None'}, stop_reason: {stop_reason}")
+        is_truncated = stop_reason in ("max_tokens", "length")
+        if is_truncated:
+            logger.warning(f"Nova Micro output truncated (stop_reason={stop_reason})")
+        return result, stop_reason, is_truncated
+    except Exception as final_exc:
+        logger.error(f"All models failed: {final_exc}")
+        raise RuntimeError("All Bedrock models failed")
     except Exception as final_exc:
         logger.error(f"All models failed: {final_exc}")
         raise RuntimeError("All Bedrock models failed")
@@ -476,7 +566,8 @@ def _update_dynamodb_diagnosis(
                 "diagnosis.#rt = :rt, "
                 "diagnosis.#ur = :ur, "
                 "diagnosis.#fm = :fm, "
-                "diagnosis.#exp = :exp"
+                "diagnosis.#exp = :exp, "
+                "diagnosis.#ds = :ds"
             ),
             ExpressionAttributeNames={
                 "#rc": "root_cause",
@@ -487,6 +578,7 @@ def _update_dynamodb_diagnosis(
                 "#ur": "used_rag",
                 "#fm": "failure_mode",
                 "#exp": "explanation",
+                "#ds": "diagnosis_status",
             },
             ExpressionAttributeValues={
                 ":rc": diagnosis_output["root_cause"],
@@ -497,6 +589,7 @@ def _update_dynamodb_diagnosis(
                 ":ur": used_rag,
                 ":fm": failure_mode,
                 ":exp": diagnosis_output["explanation"],
+                ":ds": diagnosis_output.get("diagnosis_status", "success"),
             },
             ConditionExpression="attribute_exists(incident_id)"
         )
