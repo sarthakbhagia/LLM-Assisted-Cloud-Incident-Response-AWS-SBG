@@ -67,9 +67,9 @@ export const SEVERITY_LEVELS = {
 
 // Polling intervals in milliseconds
 export const POLLING_INTERVALS = {
-  INCIDENTS_FEED: 5000, // 5 seconds
-  INCIDENT_DETAIL: 10000, // 10 seconds
-  METRICS: 30000 // 30 seconds
+  INCIDENTS_FEED: 30000, // 30 seconds
+  INCIDENT_DETAIL: 60000, // 60 seconds
+  METRICS: 120000 // 2 minutes
 }
 
 // Date formatting
