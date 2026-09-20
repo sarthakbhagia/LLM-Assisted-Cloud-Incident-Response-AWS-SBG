@@ -148,6 +148,9 @@ def scale_up(incident_record: dict) -> dict:
 
     If concurrency is currently uncapped (no reserved limit), set it to 50.
     If it already has a reserved limit, increase it by 25.
+    If the account's unreserved concurrency floor would be violated, fall back
+    to removing the reserved limit entirely (uncapped = effectively scaled up
+    relative to a previously throttled function).
     """
     action_key = "scale_up"
     function_name = _get_affected_lambda(incident_record)
@@ -163,24 +166,48 @@ def scale_up(incident_record: dict) -> dict:
         current = resp.get("ReservedConcurrentExecutions")
         new_concurrency = (current + 25) if current is not None else 50
 
-        _lambda_client.put_function_concurrency(
-            FunctionName=function_name,
-            ReservedConcurrentExecutions=new_concurrency,
-        )
-        logger.info(json.dumps({
-            "event": "scale_up_applied",
-            "function": function_name,
-            "previous_concurrency": current,
-            "new_concurrency": new_concurrency,
-        }))
-        return {
-            "success": True,
-            "action_key": action_key,
-            "notes": (
-                f"Set reserved concurrency for '{function_name}' to {new_concurrency} "
-                f"(was: {'uncapped' if current is None else current})."
-            ),
-        }
+        try:
+            _lambda_client.put_function_concurrency(
+                FunctionName=function_name,
+                ReservedConcurrentExecutions=new_concurrency,
+            )
+            logger.info(json.dumps({
+                "event": "scale_up_applied",
+                "function": function_name,
+                "previous_concurrency": current,
+                "new_concurrency": new_concurrency,
+            }))
+            return {
+                "success": True,
+                "action_key": action_key,
+                "notes": (
+                    f"Set reserved concurrency for '{function_name}' to {new_concurrency} "
+                    f"(was: {'uncapped' if current is None else current})."
+                ),
+            }
+        except ClientError as put_exc:
+            error_code = put_exc.response.get("Error", {}).get("Code", "")
+            # Account-level floor hit: remove the reserved limit instead so the
+            # function shares from the unreserved pool (effectively uncapped).
+            if error_code == "InvalidParameterValueException" and "UnreservedConcurrentExecution" in str(put_exc):
+                logger.warning(json.dumps({
+                    "event": "scale_up_floor_hit_removing_reserved_limit",
+                    "function": function_name,
+                    "attempted_concurrency": new_concurrency,
+                    "error": str(put_exc),
+                }))
+                _lambda_client.delete_function_concurrency(FunctionName=function_name)
+                return {
+                    "success": True,
+                    "action_key": action_key,
+                    "notes": (
+                        f"Removed reserved concurrency limit on '{function_name}' "
+                        "(account unreserved floor prevented setting a higher value; "
+                        "function now draws from unreserved pool - effectively uncapped)."
+                    ),
+                }
+            raise  # re-raise unexpected ClientErrors
+
     except ClientError as exc:
         logger.error(json.dumps({"event": "scale_up_error", "function": function_name, "error": str(exc)}))
         return {"success": False, "action_key": action_key, "notes": f"ClientError during scale_up: {exc}"}

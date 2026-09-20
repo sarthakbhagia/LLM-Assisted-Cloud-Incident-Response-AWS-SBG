@@ -418,6 +418,12 @@ def _parse_and_validate_json(raw_text: str) -> dict:
 
     data = json.loads(clean_text)
 
+    # Normalize keys: the LLM sometimes emits keys with leading/trailing
+    # whitespace or newlines (e.g. '\n  "root_cause"'). Strip them all so
+    # downstream .get() lookups work correctly.
+    if isinstance(data, dict):
+        data = {k.strip(): v for k, v in data.items()}
+
     # Validate mandatory fields
     if not isinstance(data, dict):
         raise ValueError("Response is not a JSON object")
