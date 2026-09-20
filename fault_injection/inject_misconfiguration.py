@@ -4,6 +4,8 @@ Fault Injection Script: Misconfiguration
 Simulates or removes S3 Public Access Block or emits AWS Config non-compliance event.
 """
 
+from __future__ import annotations
+
 import argparse
 import datetime
 import json

@@ -4,6 +4,8 @@ Fault Injection Script: Service Failure Cascade
 Simulates or triggers downstream Service C failure causing cascading errors in Service A.
 """
 
+from __future__ import annotations
+
 import argparse
 import datetime
 import json

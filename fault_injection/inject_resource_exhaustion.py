@@ -4,6 +4,8 @@ Fault Injection Script: Resource Exhaustion
 Simulates or triggers high CPU / execution duration load on Service A or triggers the CloudWatch Alarm.
 """
 
+from __future__ import annotations
+
 import argparse
 import datetime
 import json

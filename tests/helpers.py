@@ -72,12 +72,19 @@ class Fixture(unittest.TestCase):
             self.aws.setdefault(service + ".resource", _FakeAWSClient())
             return self.aws[service + ".resource"]
 
-        patcher = mock.patch.dict(
-            sys.modules,
-            {"boto3": types.SimpleNamespace(client=fake_client, resource=fake_resource)},
-        )
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        # Swap in the boto3 stub WITHOUT mock.patch.dict(sys.modules, ...):
+        # patch.dict restores the entire dict on exit, which DELETES any module
+        # first imported during a test (e.g. urllib.request, imported when a
+        # handler first makes an HTTP call). Those purges poison later tests —
+        # mock.patch("urllib.request.urlopen") would patch an orphaned module
+        # while freshly-loaded handlers bind a different instance. Save/restore
+        # only the stub keys instead; everything else stays cached as usual.
+        self._saved_modules = {
+            name: sys.modules.get(name)
+            for name in ("boto3", "botocore", "botocore.exceptions")
+        }
+        sys.modules["boto3"] = types.SimpleNamespace(client=fake_client, resource=fake_resource)
+        self.addCleanup(self._restore_stub_modules)
 
         # Fresh module import per test so module-level env reads re-execute.
         for name in list(sys.modules):
@@ -85,6 +92,13 @@ class Fixture(unittest.TestCase):
                 del sys.modules[name]
 
     # -- helpers -----------------------------------------------------------
+
+    def _restore_stub_modules(self):
+        for name, previous in self._saved_modules.items():
+            if previous is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = previous
 
     def load_handler(self, path, env=None):
         """Import a handler module by path with the given env vars set."""

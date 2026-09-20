@@ -4,6 +4,8 @@ Evaluation Metrics Computation Engine
 Computes MTTR, RCA Accuracy, Hallucination Rate, Diagnosis-Recovery Gap, and Failure Mode Taxonomy.
 """
 
+from __future__ import annotations
+
 import datetime
 import json
 import logging

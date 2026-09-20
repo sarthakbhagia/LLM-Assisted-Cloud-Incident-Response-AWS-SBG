@@ -5,6 +5,8 @@ Constructs system and user prompts for Bedrock Claude model execution,
 enforcing strict JSON response formatting matching the diagnosis output contract.
 """
 
+from __future__ import annotations
+
 import json
 
 VALID_SUGGESTED_ACTIONS = [
