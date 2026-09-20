@@ -115,8 +115,6 @@ def _get_incidents(event: dict) -> dict:
 
     table = _dynamodb.Table(INCIDENTS_TABLE)
 
-    scan_kwargs: dict = {"Limit": limit}
-
     # Build filter expression if filters are provided
     filter_expr = None
     if fault_class:
@@ -124,32 +122,47 @@ def _get_incidents(event: dict) -> dict:
     if status_filter:
         status_cond = Attr("remediation").exists() & Attr("remediation.status").eq(status_filter)
         filter_expr = filter_expr & status_cond if filter_expr else status_cond
-    if filter_expr is not None:
-        scan_kwargs["FilterExpression"] = filter_expr
 
-    # Pagination: decode the continuation token
+    # Decode the continuation token (offset-based, since we sort after scanning)
+    offset = 0
     if next_token:
         try:
-            lek_bytes = base64.b64decode(next_token.encode())
-            scan_kwargs["ExclusiveStartKey"] = json.loads(lek_bytes)
+            decoded = json.loads(base64.b64decode(next_token.encode()))
+            offset = int(decoded.get("o", 0))
         except Exception:
             return _bad_request("Invalid next_token")
 
-    response = table.scan(**scan_kwargs)
-    items = response.get("Items", [])
+    # Scan the WHOLE table (page by page), then sort newest-first, then slice.
+    # DynamoDB Scan returns items in arbitrary (effectively insertion) order;
+    # passing `limit` as the Scan Limit evaluates an arbitrary subset in which
+    # the newest incidents are consistently last, so they never appeared on
+    # page 1 of the dashboard. The table is demo-scale, so a full scan is cheap.
+    scan_kwargs: dict = {}
+    if filter_expr is not None:
+        scan_kwargs["FilterExpression"] = filter_expr
+
+    items: list = []
+    while True:
+        response = table.scan(**scan_kwargs)
+        items.extend(response.get("Items", []))
+        last_evaluated_key = response.get("LastEvaluatedKey")
+        if not last_evaluated_key:
+            break
+        scan_kwargs["ExclusiveStartKey"] = last_evaluated_key
 
     # Sort newest-first in-Lambda (DynamoDB Scan has no ORDER BY)
     items.sort(key=lambda r: r.get("detected_at", ""), reverse=True)
 
-    # Build next_token for the caller
+    page = items[offset:offset + limit]
+
+    # Build next_token for the caller when more sorted items remain
     new_next_token = None
-    last_evaluated_key = response.get("LastEvaluatedKey")
-    if last_evaluated_key:
+    if offset + limit < len(items):
         new_next_token = base64.b64encode(
-            json.dumps(last_evaluated_key, default=_decimal_default).encode()
+            json.dumps({"o": offset + limit}).encode()
         ).decode()
 
-    return _ok({"items": items, "next_token": new_next_token, "count": len(items)})
+    return _ok({"items": page, "next_token": new_next_token, "count": len(page)})
 
 
 def _get_incident(incident_id: str) -> dict:
