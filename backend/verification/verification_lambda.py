@@ -1,5 +1,5 @@
 """
-app.py - Phase 6.5: Closed-loop Verification Lambda
+verification_lambda.py — Phase 6.5: Closed-loop Verification Lambda
 
 Core research novelty: after remediation executes, wait 2 minutes,
 re-query the same signal that triggered detection, and write the result
@@ -8,6 +8,16 @@ back to IncidentRecord.verification.
 This measures the gap between "the LLM diagnosed correctly" and
 "the fix actually resolved the incident" - which is the paper's
 headline contribution (diagnosis-recovery gap metric).
+
+Two-phase design (no sleeping in the function):
+  Phase 1 (first invoke, no `phase` field):
+      Registers a one-off EventBridge Scheduler schedule ~VERIFICATION_WAIT_SECONDS
+      in the future whose target re-invokes THIS Lambda with phase="recheck"
+      and the original payload. Returns immediately - zero billed wall-clock
+      wait, no container held hostage, and Scheduler's built-in retry policy
+      covers transient failures (the old time.sleep(120) version did neither).
+  Phase 2 (scheduled invoke, phase="recheck"):
+      Runs the signal re-check and writes the outcome to DynamoDB.
 
 Signal re-check logic per fault_class:
   resource_exhaustion  -> CloudWatch Metrics: Lambda Duration for the affected function.
@@ -28,7 +38,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import time
 from datetime import datetime, timedelta, timezone
 
 import boto3
@@ -41,11 +50,19 @@ _cw = boto3.client("cloudwatch")
 _config_client = boto3.client("config")
 _dynamodb = boto3.resource("dynamodb")
 _lambda_client = boto3.client("lambda")
+_scheduler = boto3.client("scheduler")
 
 INCIDENTS_TABLE = os.environ["INCIDENTS_TABLE"]
 
-# Wait period before re-checking (2 minutes, per spec step 21 "2-5 minutes")
-VERIFICATION_WAIT_SECONDS = 120
+# Delay before re-checking (2 minutes, per spec step 21 "2-5 minutes")
+VERIFICATION_WAIT_SECONDS = int(os.environ.get("VERIFICATION_WAIT_SECONDS", "120"))
+
+# IAM role the EventBridge Scheduler assumes to invoke this function
+SCHEDULER_ROLE_ARN = os.environ.get("SCHEDULER_ROLE_ARN", "")
+# Named schedule group the one-off schedules are created in (matches IAM scope)
+SCHEDULER_GROUP_NAME = os.environ.get("SCHEDULER_GROUP_NAME", "default")
+# Shared pipeline DLQ: Scheduler delivers here when re-check delivery fails
+PIPELINE_DLQ_ARN = os.environ.get("PIPELINE_DLQ_ARN", "")
 
 # Lookback window for metric re-check (last 5 minutes of data points)
 METRIC_LOOKBACK_SECONDS = 300
@@ -56,27 +73,131 @@ METRIC_LOOKBACK_SECONDS = 300
 # ===========================================================================
 
 def lambda_handler(event, context):
-    logger.info(json.dumps({"event": "verification_triggered", "payload": event}, default=str))
+    payload = event if isinstance(event, dict) else {}
+    logger.info(json.dumps({"event": "verification_triggered", "payload": payload}, default=str))
 
-    incident_id = event.get("incident_id")
-    fault_class = event.get("fault_class", "unknown")
-    original_signal = event.get("original_signal") or {}
-
+    incident_id = payload.get("incident_id")
     if not incident_id:
         logger.error("Missing incident_id in verification event")
         return {"statusCode": 400, "body": json.dumps({"error": "Missing incident_id"})}
 
-    # Wait for the fix to propagate before re-checking the signal.
-    # This is intentional - the spec requires a fixed interval post-remediation.
-    logger.info(json.dumps({
-        "event": "verification_waiting",
-        "incident_id": incident_id,
-        "wait_seconds": VERIFICATION_WAIT_SECONDS,
-        "fault_class": fault_class,
-    }))
-    time.sleep(VERIFICATION_WAIT_SECONDS)
+    if payload.get("phase") == "recheck":
+        return _run_recheck(payload)
+    return _schedule_recheck(payload, context)
 
-    # Re-check the original signal
+
+# ===========================================================================
+# Phase 1: register the one-off scheduled re-check
+# ===========================================================================
+
+def _schedule_recheck(payload: dict, context) -> dict:
+    incident_id = payload["incident_id"]
+    # Original event-id of the trigger (set by the DLQ replay script) so the
+    # one-off schedule name is unique per replayed delivery.
+    event_uid = payload.get("event_uid")
+    suffix = f"-{event_uid}" if event_uid else ""
+    incident_id_log = incident_id if not event_uid else f"{incident_id}#evt:{event_uid}"
+
+    # Re-invoking verification (e.g. the sweeper retried remediation) must not
+    # stack duplicate schedules; the name is unique per incident.
+    schedule_name = f"verify-{incident_id}{suffix}"[:64]
+    run_at = datetime.now(timezone.utc) + timedelta(seconds=VERIFICATION_WAIT_SECONDS)
+    # one-off "at()" schedules are expressed in UTC
+    schedule_expression = f"at({run_at.strftime('%Y-%m-%dT%H:%M:%S')})"
+
+    target_arn = (
+        getattr(context, "invoked_function_arn", None) if context is not None else None
+    ) or os.environ.get("VERIFICATION_FUNCTION_ARN", "")
+
+    if not target_arn:
+        logger.error(json.dumps({
+            "event": "verification_schedule_error",
+            "incident_id": incident_id,
+            "error": "no target function ARN (no Lambda context and VERIFICATION_FUNCTION_ARN unset)",
+        }))
+        return {"statusCode": 500, "body": json.dumps({"error": "Verification target not configured"})}
+
+    recheck_payload = dict(payload, phase="recheck")
+    try:
+        _scheduler.create_schedule(
+            Name=schedule_name,
+            GroupName=SCHEDULER_GROUP_NAME,
+            ScheduleExpression=schedule_expression,
+            ScheduleExpressionTimezone="UTC",
+            FlexibleTimeWindow={"Mode": "OFF"},
+            ActionAfterCompletion="DELETE",  # one-shot: clean itself up
+            Target={
+                "Arn": target_arn,
+                "RoleArn": SCHEDULER_ROLE_ARN,
+                "Input": json.dumps(recheck_payload, default=str),
+                "RetryPolicy": {
+                    "MaximumRetryAttempts": 5,
+                    "MaximumEventAgeInSeconds": 3600,
+                },
+                # After Scheduler's retries exhaust, land the re-check payload
+                # in the shared pipeline DLQ so the loss is alarmed on.
+                "DeadLetterConfig": {"Arn": PIPELINE_DLQ_ARN},
+            },
+        )
+        logger.info(json.dumps({
+            "event": "verification_scheduled",
+            "incident_id": incident_id_log,
+            "schedule_name": schedule_name,
+            "recheck_at": run_at.isoformat(),
+            "wait_seconds": VERIFICATION_WAIT_SECONDS,
+        }))
+        return {
+            "statusCode": 200,
+            "body": json.dumps({
+                "incident_id": incident_id,
+                "scheduled": True,
+                "schedule_name": schedule_name,
+                "recheck_at": run_at.isoformat(),
+            }),
+        }
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") == "ConflictException":
+            # Already scheduled for this incident (duplicate invoke) - idempotent.
+            logger.info(json.dumps({
+                "event": "verification_schedule_exists",
+                "incident_id": incident_id,
+                "schedule_name": schedule_name,
+            }))
+            return {
+                "statusCode": 200,
+                "body": json.dumps({
+                    "incident_id": incident_id,
+                    "scheduled": True,
+                    "already_scheduled": True,
+                    "schedule_name": schedule_name,
+                }),
+            }
+        logger.error(json.dumps({
+            "event": "verification_schedule_error",
+            "incident_id": incident_id,
+            "error": str(exc),
+            "ATTENTION": (
+                "Could not schedule the verification re-check. This incident will "
+                "keep verification.status='not_run' unless re-invoked."
+            ),
+        }))
+        return {
+            "statusCode": 500,
+            "body": json.dumps({
+                "error": f"Failed to schedule verification re-check: {exc}"
+            }),
+        }
+
+
+# ===========================================================================
+# Phase 2: the scheduled re-check (original Phase 6.5 logic)
+# ===========================================================================
+
+def _run_recheck(payload: dict) -> dict:
+    incident_id = payload["incident_id"]
+    fault_class = payload.get("fault_class", "unknown")
+    original_signal = payload.get("original_signal") or {}
+
     status, signal_rechecked, notes = _recheck_signal(fault_class, original_signal)
 
     logger.info(json.dumps({
@@ -87,7 +208,6 @@ def lambda_handler(event, context):
         "notes": notes,
     }))
 
-    # Write result back to DynamoDB
     _update_verification_record(incident_id, status, signal_rechecked, notes)
 
     return {

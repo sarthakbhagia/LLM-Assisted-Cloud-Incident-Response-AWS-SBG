@@ -63,6 +63,84 @@ Parameters:
 
 Resources:
 
+  # ===========================================================================
+  # PIPELINE SELF-HEALING - DEAD LETTER QUEUES
+  # Every async hop (EventBridge -> collector, diagnosis -> notify,
+  # approval -> remediation, remediation -> verification, and the
+  # scheduler-driven verification re-check) can silently drop work when the
+  # target fails after retries. Each hop now lands failed events in this DLQ
+  # and a queue-depth alarm fires the moment anything is stranded, so a
+  # stalled pipeline is a visible alarm instead of a mystery.
+  # ===========================================================================
+
+  PipelineDlq:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "incident-pipeline-dlq-${Environment}"
+      MessageRetentionPeriod: 1209600  # 14 days - enough to triage and replay
+
+  # EventBridge delivers DeadLetterConfig events as the events.amazonaws.com
+  # service principal; SAM grants the queue policy for function-level DLQs
+  # automatically, but rule-level DeadLetterConfig needs this explicit grant.
+  PipelineDlqEventBridgePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues: [!Ref PipelineDlq]
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt PipelineDlq.Arn
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+
+  DlqAlarmTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "incident-pipeline-alerts-${Environment}"
+
+  DlqAlarmTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics: [!Ref DlqAlarmTopic]
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudwatch.amazonaws.com
+            Action: sns:Publish
+            Resource: !Ref DlqAlarmTopic
+            Condition:
+              StringEquals:
+                AWS:SourceAccount: !Ref AWS::AccountId
+
+  # Any message in the DLQ means an incident pipeline hop was lost. Fires on
+  # the first message and resolves when the queue is drained.
+  PipelineDlqAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "incident-pipeline-dlq-not-empty-${Environment}"
+      AlarmDescription: A pipeline hop dropped an event - inspect the DLQ and replay the incident
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt PipelineDlq.QueueName
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref DlqAlarmTopic]
+      OKActions: [!Ref DlqAlarmTopic]
+
   # ---------------------------------------------------------------------------
   # Incident data lake (raw observability bundles + runbook docs)
   # ---------------------------------------------------------------------------
@@ -188,6 +266,14 @@ Resources:
                 Action:
                   - bedrock:InvokeModel
                 Resource: '*'
+        - PolicyName: write-pipeline-dlq
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Async-invoke DLQ writes (collector/diagnosis function-level DLQs)
+              - Effect: Allow
+                Action: sqs:SendMessage
+                Resource: !GetAtt PipelineDlq.Arn
         - PolicyName: invoke-downstream-lambdas
           PolicyDocument:
             Version: '2012-10-17'
@@ -279,6 +365,29 @@ Resources:
                   - lambda:InvokeFunction
                 Resource:
                   - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:llm-incident-response-${Environment}-VerificationFunction*"
+        - PolicyName: write-pipeline-dlq
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Async-invoke DLQ writes (remediation/verification function-level DLQs)
+              - Effect: Allow
+                Action: sqs:SendMessage
+                Resource: !GetAtt PipelineDlq.Arn
+        - PolicyName: schedule-verification-recheck
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Verification schedules a one-off EventBridge Scheduler re-check
+              # instead of sleeping in the function (no billed wait time).
+              - Effect: Allow
+                Action: scheduler:CreateSchedule
+                Resource: !Sub "arn:aws:scheduler:${AWS::Region}:${AWS::AccountId}:schedule/verification-rechecks-${Environment}/verify-*"
+              - Effect: Allow
+                Action: iam:PassRole
+                Resource: !GetAtt VerificationSchedulerRole.Arn
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: scheduler.amazonaws.com
 
   # ===========================================================================
   # PHASE 1 - DEMO APPLICATION
@@ -425,6 +534,9 @@ Resources:
       Description: Receives incident detection events, collects observability evidence, writes to S3+DynamoDB, invokes diagnosis
       Timeout: 300
       MemorySize: 512
+      DeadLetterQueue:
+        Type: SQS
+        TargetArn: !GetAtt PipelineDlq.Arn
       Environment:
         Variables:
           INCIDENTS_TABLE: !Ref IncidentsTable
@@ -440,6 +552,9 @@ Resources:
       Description: Receives incident evidence, loads runbook context, calls Bedrock for LLM diagnosis
       Timeout: 120
       MemorySize: 512
+      DeadLetterQueue:
+        Type: SQS
+        TargetArn: !GetAtt PipelineDlq.Arn
       Environment:
         Variables:
           INCIDENTS_TABLE: !Ref IncidentsTable
@@ -469,6 +584,11 @@ Resources:
       Targets:
         - Arn: !GetAtt CollectorFunction.Arn
           Id: CollectorTarget
+          DeadLetterConfig:
+            Arn: !GetAtt PipelineDlq.Arn
+          RetryPolicy:
+            MaximumRetryAttempts: 2
+            MaximumEventAgeInSeconds: 3600
           InputTransformer:
             InputPathsMap:
               alarm_name: "$.detail.alarmName"
@@ -507,6 +627,11 @@ Resources:
       Targets:
         - Arn: !GetAtt CollectorFunction.Arn
           Id: GuardDutyCollectorTarget
+          DeadLetterConfig:
+            Arn: !GetAtt PipelineDlq.Arn
+          RetryPolicy:
+            MaximumRetryAttempts: 2
+            MaximumEventAgeInSeconds: 3600
 
   GuardDutyIncidentEventPermission:
     Type: AWS::Lambda::Permission
@@ -560,6 +685,11 @@ Resources:
       Targets:
         - Arn: !GetAtt CollectorFunction.Arn
           Id: CascadeCollectorTarget
+          DeadLetterConfig:
+            Arn: !GetAtt PipelineDlq.Arn
+          RetryPolicy:
+            MaximumRetryAttempts: 2
+            MaximumEventAgeInSeconds: 3600
           InputTransformer:
             InputPathsMap:
               alarm_name: "$.detail.alarmName"
@@ -594,6 +724,9 @@ Resources:
       Description: Executes the approved remediation action then async-invokes the verification Lambda
       Timeout: 300
       MemorySize: 256
+      DeadLetterQueue:
+        Type: SQS
+        TargetArn: !GetAtt PipelineDlq.Arn
       Environment:
         Variables:
           INCIDENTS_TABLE: !Ref IncidentsTable
@@ -612,13 +745,116 @@ Resources:
       CodeUri: ../backend/verification/
       Handler: verification_lambda.lambda_handler
       Role: !GetAtt RemediationRole.Arn
-      Description: Re-checks the original incident signal post-remediation and writes verification outcome to DynamoDB
-      Timeout: 600
+      Description: Schedules a one-off re-check of the original incident signal and writes the verification outcome to DynamoDB
+      Timeout: 120
       MemorySize: 256
+      DeadLetterQueue:
+        Type: SQS
+        TargetArn: !GetAtt PipelineDlq.Arn
       Environment:
         Variables:
           INCIDENTS_TABLE: !Ref IncidentsTable
           DATA_LAKE_BUCKET: !Ref IncidentDataLake
+          VERIFICATION_WAIT_SECONDS: "120"
+          SCHEDULER_ROLE_ARN: !GetAtt VerificationSchedulerRole.Arn
+          SCHEDULER_GROUP_NAME: !Sub "verification-rechecks-${Environment}"
+          VERIFICATION_FUNCTION_ARN: !GetAtt VerificationFunction.Arn
+          PIPELINE_DLQ_ARN: !GetAtt PipelineDlq.Arn
+
+  # Role assumed BY EventBridge Scheduler to invoke the verification Lambda
+  # for the one-off re-check. Deliberately separate from RemediationRole.
+  VerificationSchedulerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "incident-verification-scheduler-role-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: scheduler.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: invoke-verification-recheck
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt VerificationFunction.Arn
+              # Scheduler delivers failed re-check deliveries to the shared
+              # pipeline DLQ using this role's credentials.
+              - Effect: Allow
+                Action: sqs:SendMessage
+                Resource: !GetAtt PipelineDlq.Arn
+
+  # EventBridge Scheduler needs a group for the one-off schedules; the
+  # verification Lambda creates each schedule under this group with
+  # ActionAfterComplete=DELETE so they clean themselves up.
+  VerificationScheduleGroup:
+    Type: AWS::Scheduler::ScheduleGroup
+    Properties:
+      Name: !Sub "verification-rechecks-${Environment}"
+
+  # ===========================================================================
+  # PIPELINE SELF-HEALING - APPROVED-STATE SWEEPER
+  # The approval -> remediation hop is async: if the invoke fails or the
+  # remediation Lambda dies before writing its terminal status, the incident
+  # is stranded at remediation.status=approved forever (observed in staging).
+  # The sweeper re-invokes remediation for such records; remediation's own
+  # status checks + conditional writes make the retry idempotent.
+  # ===========================================================================
+
+  SweeperRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "incident-sweeper-role-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: sweeper-scan-reinvoke
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:Scan
+                  - dynamodb:UpdateItem
+                Resource: !GetAtt IncidentsTable.Arn
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt RemediationFunction.Arn
+
+  SweeperFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../backend/sweeper/
+      Handler: sweeper_lambda.lambda_handler
+      Role: !GetAtt SweeperRole.Arn
+      Description: Re-invokes remediation for incidents stuck in remediation.status=approved beyond STUCK_AFTER_SECONDS
+      Timeout: 120
+      MemorySize: 128
+      Environment:
+        Variables:
+          INCIDENTS_TABLE: !Ref IncidentsTable
+          REMEDIATION_FUNCTION_NAME: !Ref RemediationFunction
+          STUCK_AFTER_SECONDS: "600"
+          MAX_SWEEP_PER_RUN: "10"
+          MAX_AGE_HOURS: "48"
+      Events:
+        EveryFiveMinutes:
+          Type: Schedule
+          Properties:
+            Schedule: rate(5 minutes)
+            Description: Sweep stranded approved incidents
+            Enabled: true
 
   IncidentDataLakeConfigPolicy:
     Type: AWS::S3::BucketPolicy
@@ -656,6 +892,9 @@ Resources:
       Role: !GetAtt ReportingApprovalRole.Arn
       Description: Formats the diagnosis into a Slack message and posts it via incoming webhook
       Timeout: 30
+      DeadLetterQueue:
+        Type: SQS
+        TargetArn: !GetAtt PipelineDlq.Arn
       Environment:
         Variables:
           INCIDENTS_TABLE: !Ref IncidentsTable
@@ -672,6 +911,9 @@ Resources:
       Role: !GetAtt ReportingApprovalRole.Arn
       Description: Approve/reject endpoint; updates incident status and invokes remediation when approved
       Timeout: 30
+      DeadLetterQueue:
+        Type: SQS
+        TargetArn: !GetAtt PipelineDlq.Arn
       Environment:
         Variables:
           INCIDENTS_TABLE: !Ref IncidentsTable
@@ -705,6 +947,14 @@ Resources:
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
       Policies:
+        - PolicyName: write-pipeline-dlq
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Async-invoke DLQ writes (notify/approval function-level DLQs)
+              - Effect: Allow
+                Action: sqs:SendMessage
+                Resource: !GetAtt PipelineDlq.Arn
         - PolicyName: incident-record-read
           PolicyDocument:
             Version: '2012-10-17'
@@ -960,6 +1210,10 @@ Outputs:
   RemediationFunctionArn:
     Description: ARN of the Phase 6 remediation Lambda
     Value: !GetAtt RemediationFunction.Arn
+
+  SweeperFunctionArn:
+    Description: ARN of the approved-state sweeper Lambda
+    Value: !GetAtt SweeperFunction.Arn
 
   VerificationFunctionArn:
     Description: ARN of the Phase 6.5 verification Lambda
