@@ -47,7 +47,7 @@ export default function Analytics() {
         apiClient.getIncidents({ limit: 100 })
       ])
       setResults(analyticsData)
-      setIncidents(incidentsData.incidents || [])
+      setIncidents(incidentsData?.items || [])
       setError(null)
     } catch (err) {
       console.error('Failed to fetch analytics data:', err)

@@ -77,7 +77,7 @@ export default function DemoControls() {
     const pollStatus = async () => {
       try {
         const data = await apiClient.getIncidents({ limit: 1, sort: 'detected_at', order: 'desc' })
-        const incidents = data.incidents || []
+        const incidents = data?.items || []
         if (incidents.length > 0) {
           const latest = incidents[0]
           const remediationStatus = latest.remediation?.status
@@ -134,13 +134,7 @@ export default function DemoControls() {
     if (!activeIncident?.incident_id) return
     setLoading(true)
     try {
-      // Call the demo approval endpoint
-      const response = await fetch(`${apiClient.baseURL}/demo/approve/${activeIncident.incident_id}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({}),
-      })
-      if (!response.ok) throw new Error('Approval failed')
+      await apiClient.approveIncidentMain(activeIncident.incident_id)
       setPendingApproval(false)
     } catch (err) {
       setError(err.message || 'Failed to approve')
@@ -193,11 +187,10 @@ export default function DemoControls() {
             const Icon = fault.icon
             const isDisabled = loading || activeIncident
             return (
-              <button
+              <div
                 key={fault.id}
-                onClick={() => handleInjectFault(fault.id)}
-                disabled={isDisabled}
-                className={`card p-5 relative ${fault.bgColor} ${isDisabled ? 'opacity-50 cursor-not-allowed' : 'hover:border-border-strong hover:bg-opacity-20'} transition-all group`}
+                onClick={() => !isDisabled && handleInjectFault(fault.id)}
+                className={`card p-5 relative ${fault.bgColor} ${isDisabled ? 'opacity-50 cursor-not-allowed' : 'hover:border-border-strong hover:bg-opacity-20 cursor-pointer'} transition-all group`}
               >
                 <div className="flex items-center space-x-3 mb-3">
                   <div className={`p-3 rounded-lg ${fault.color} bg-opacity-10`}>
@@ -209,7 +202,7 @@ export default function DemoControls() {
                 <button
                   onClick={(e) => {
                     e.stopPropagation()
-                    handleInjectFault(fault.id)
+                    if (!isDisabled) handleInjectFault(fault.id)
                   }}
                   disabled={isDisabled}
                   className="w-full btn-primary text-sm disabled:opacity-50 disabled:cursor-not-allowed"
@@ -228,7 +221,7 @@ export default function DemoControls() {
                     A demo is already running — see tracker below
                   </div>
                 )}
-              </button>
+              </div>
             )
           })}
         </div>

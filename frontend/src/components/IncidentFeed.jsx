@@ -1,9 +1,9 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { RefreshCw, AlertTriangle, Clock, CheckCircle, ArrowRight } from 'lucide-react'
+import { RefreshCw, AlertTriangle, Clock, CheckCircle, ArrowRight, CheckSquare } from 'lucide-react'
 import { apiClient } from '../config/api'
-import { POLLING_INTERVALS, FAULT_CLASS_LABELS } from '../utils/constants'
-import { formatDate, getIncidentStatus, getSeverityFromFaultClass, formatMTTR, calculateMTTR } from '../utils/helpers'
+import { POLLING_INTERVALS, FAULT_CLASS_LABELS, getConfidenceLevel } from '../utils/constants'
+import { formatDate, getIncidentStatus, getSeverityFromFaultClass } from '../utils/helpers'
 
 export default function IncidentFeed() {
   const [incidents, setIncidents] = useState([])
@@ -14,6 +14,7 @@ export default function IncidentFeed() {
     status: '',
     faultClass: ''
   })
+  const [approvingId, setApprovingId] = useState(null)
   
   const navigate = useNavigate()
 
@@ -24,7 +25,7 @@ export default function IncidentFeed() {
       if (filters.faultClass) params.faultClass = filters.faultClass
       
       const data = await apiClient.getIncidents(params)
-      setIncidents(data.incidents || [])
+      setIncidents(data?.items || [])
       setLastUpdated(new Date())
       setError(null)
     } catch (err) {
@@ -43,6 +44,19 @@ export default function IncidentFeed() {
 
   const handleRowClick = (incidentId) => {
     navigate(`/incidents/${incidentId}`)
+  }
+
+  const handleInlineApprove = async (e, incidentId) => {
+    e.stopPropagation()
+    setApprovingId(incidentId)
+    try {
+      await apiClient.approveIncidentMain(incidentId)
+      await fetchIncidents()
+    } catch (err) {
+      console.error('Inline approve failed:', err)
+    } finally {
+      setApprovingId(null)
+    }
   }
 
   const clearFilters = () => {
@@ -68,7 +82,7 @@ export default function IncidentFeed() {
 
   return (
     <div className="space-y-4">
-      {/* Filters & Refresh Header */}
+      {/* Filters and Refresh Header */}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center space-x-3">
           <select 
@@ -78,8 +92,9 @@ export default function IncidentFeed() {
           >
             <option value="">All Statuses</option>
             <option value="pending_approval">Pending Approval</option>
+            <option value="approved">Approved</option>
             <option value="executed">Executed</option>
-            <option value="resolved">Resolved</option>
+            <option value="rejected">Rejected</option>
             <option value="failed">Failed</option>
           </select>
           
@@ -137,17 +152,21 @@ export default function IncidentFeed() {
                   <th className="table-cell text-left">Severity</th>
                   <th className="table-cell text-left">Incident ID</th>
                   <th className="table-cell text-left">Fault Class</th>
-                  <th className="table-cell text-left">Status</th>
+                  <th className="table-cell text-left">Affected Resource</th>
                   <th className="table-cell text-left">Detected</th>
-                  <th className="table-cell text-left">Diagnosis</th>
-                  <th className="table-cell text-right">Actions</th>
+                  <th className="table-cell text-left">Status</th>
+                  <th className="table-cell text-left">Confidence</th>
+                  <th className="table-cell text-right">Action</th>
                 </tr>
               </thead>
               <tbody>
                 {incidents.map((incident) => {
                   const statusInfo = getIncidentStatus(incident)
                   const severity = getSeverityFromFaultClass(incident.fault_class)
-                  const rootCause = incident.diagnosis?.root_cause
+                  const confidenceLevel = incident.diagnosis?.confidence != null
+                    ? getConfidenceLevel(incident.diagnosis.confidence)
+                    : null
+                  const isPendingApproval = incident.remediation?.status === 'pending_approval'
 
                   return (
                     <tr 
@@ -171,14 +190,16 @@ export default function IncidentFeed() {
 
                       {/* Fault Class */}
                       <td className="table-cell">
-                        <span className="text-xs text-text-secondary capitalize">
+                        <span className="text-xs text-text-secondary">
                           {FAULT_CLASS_LABELS[incident.fault_class] || incident.fault_class?.replace(/_/g, ' ') || '—'}
                         </span>
                       </td>
 
-                      {/* Status Badge */}
-                      <td className="table-cell">
-                        <StatusBadge statusKey={statusInfo.status} label={statusInfo.label} />
+                      {/* Affected Resource */}
+                      <td className="table-cell max-w-xs">
+                        <span className="mono text-xs text-text-secondary truncate block" title={incident.resource_id}>
+                          {incident.resource_id || '—'}
+                        </span>
                       </td>
 
                       {/* Detected */}
@@ -188,33 +209,47 @@ export default function IncidentFeed() {
                         </span>
                       </td>
 
-                      {/* Diagnosis */}
-                      <td className="table-cell max-w-xs">
-                        {rootCause ? (
-                          <span className="text-xs text-text-primary truncate block" title={rootCause}>
-                            {rootCause.length > 60 ? `${rootCause.substring(0, 60)}...` : rootCause}
+                      {/* Status Badge */}
+                      <td className="table-cell">
+                        <StatusBadge statusKey={statusInfo.status} label={statusInfo.label} />
+                      </td>
+
+                      {/* AI Confidence */}
+                      <td className="table-cell">
+                        {confidenceLevel ? (
+                          <span className={`badge ${confidenceLevel.className}`}>
+                            {confidenceLevel.label} {Math.round((incident.diagnosis.confidence || 0) * 100)}%
                           </span>
                         ) : (
-                          <div className="flex items-center space-x-2 text-xs text-amber">
-                            <span className="w-2 h-2 rounded-full bg-amber animate-pulse"></span>
-                            <span>Diagnosing...</span>
-                          </div>
+                          <span className="text-xs text-text-muted">—</span>
                         )}
                       </td>
 
-                      {/* Actions */}
+                      {/* Action */}
                       <td className="table-cell text-right">
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            handleRowClick(incident.incident_id)
-                          }}
-                          className="btn-ghost p-1 h-auto text-xs text-text-secondary group-hover:text-text-primary group-hover:border-border-strong inline-flex items-center"
-                          title="View Details"
-                        >
-                          <span className="mr-1 hidden sm:inline">Details</span>
-                          <ArrowRight className="w-3.5 h-3.5" />
-                        </button>
+                        {isPendingApproval ? (
+                          <button
+                            onClick={(e) => handleInlineApprove(e, incident.incident_id)}
+                            disabled={approvingId === incident.incident_id}
+                            className="btn-danger py-1 px-2 h-auto text-xs inline-flex items-center space-x-1"
+                            title="Approve remediation"
+                          >
+                            <CheckSquare className="w-3.5 h-3.5" />
+                            <span>{approvingId === incident.incident_id ? 'Approving...' : 'Approve'}</span>
+                          </button>
+                        ) : (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              handleRowClick(incident.incident_id)
+                            }}
+                            className="btn-ghost p-1 h-auto text-xs text-text-secondary group-hover:text-text-primary group-hover:border-border-strong inline-flex items-center"
+                            title="View Details"
+                          >
+                            <span className="mr-1 hidden sm:inline">Details</span>
+                            <ArrowRight className="w-3.5 h-3.5" />
+                          </button>
+                        )}
                       </td>
                     </tr>
                   )
@@ -290,13 +325,14 @@ function IncidentFeedSkeleton() {
         
         {Array.from({ length: 5 }).map((_, i) => (
           <div key={i} className="border-b border-border-subtle p-3">
-            <div className="flex justify-between items-center">
+            <div className="flex justify-between items-center gap-3">
               <div className="pulse-loading h-6 w-16 rounded-badge"></div>
               <div className="pulse-loading h-4 w-20"></div>
               <div className="pulse-loading h-4 w-32"></div>
-              <div className="pulse-loading h-6 w-24 rounded-badge"></div>
+              <div className="pulse-loading h-4 w-28"></div>
               <div className="pulse-loading h-4 w-20"></div>
-              <div className="pulse-loading h-4 w-40"></div>
+              <div className="pulse-loading h-6 w-24 rounded-badge"></div>
+              <div className="pulse-loading h-6 w-20 rounded-badge"></div>
               <div className="pulse-loading h-6 w-8 rounded-button"></div>
             </div>
           </div>

@@ -1,14 +1,18 @@
 // API Configuration
-// Set VITE_API_BASE_URL environment variable to the deployed API Gateway URL
-// Example: https://o212lf1md4.execute-api.ap-south-1.amazonaws.com/Prod
-// Demo control API (separate stack): https://0l32vjl4n8.execute-api.ap-south-1.amazonaws.com/Prod
-export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'https://o212lf1md4.execute-api.ap-south-1.amazonaws.com/Prod'
-export const DEMO_API_BASE_URL = import.meta.env.VITE_DEMO_API_BASE_URL || 'https://0l32vjl4n8.execute-api.ap-south-1.amazonaws.com/Prod'
+// In local dev: leave VITE_API_BASE_URL unset. The Vite dev server proxy
+// (vite.config.js server.proxy) routes /api/* to localhost:3001 automatically.
+// In production: set VITE_API_BASE_URL to your API Gateway Prod stage URL, e.g.:
+//   VITE_API_BASE_URL=https://o212lf1md4.execute-api.ap-south-1.amazonaws.com/Prod
+//   VITE_DEMO_API_BASE_URL=https://0l32vjl4n8.execute-api.ap-south-1.amazonaws.com/Prod
+export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || ''
+export const DEMO_API_BASE_URL = import.meta.env.VITE_DEMO_API_BASE_URL || ''
 
 export const API_ENDPOINTS = {
   INCIDENTS: '/api/incidents',
   INCIDENT_DETAIL: (id) => `/api/incidents/${id}`,
   INCIDENT_EVIDENCE: (id) => `/api/incidents/${id}/evidence`,
+  INCIDENT_APPROVE: (id) => `/api/incidents/${id}/approve`,
+  INCIDENT_REJECT: (id) => `/api/incidents/${id}/reject`,
   ANALYTICS: '/api/analytics',
   RUNBOOKS: '/api/runbooks',
   RUNBOOK: (faultClass) => `/api/runbooks/${faultClass}`,
@@ -46,8 +50,16 @@ class ApiClient {
         throw new Error(`HTTP error! status: ${response.status}`)
       }
       
-      const data = await response.json()
-      return data
+      const json = await response.json()
+
+      // Unwrap the backend envelope { data: ..., error: ... }
+      // The demo control API does NOT use this envelope — skip unwrap for those
+      if (!useDemoURL && json !== null && typeof json === 'object' && 'data' in json) {
+        if (json.error) throw new Error(json.error)
+        return json.data
+      }
+
+      return json
     } catch (error) {
       console.error(`API request failed for ${endpoint}:`, error)
       throw error
@@ -68,6 +80,7 @@ class ApiClient {
   }
 
   // Incident API methods (use main API)
+  // Returns { items: [], next_token: string|null, count: number }
   async getIncidents(params = {}) {
     return this.get(API_ENDPOINTS.INCIDENTS, params)
   }
@@ -94,6 +107,18 @@ class ApiClient {
 
   async getHealth() {
     return this.get(API_ENDPOINTS.HEALTH)
+  }
+
+  async getServices() {
+    return this.get('/api/services')
+  }
+
+  async approveIncidentMain(incidentId) {
+    return this.post(API_ENDPOINTS.INCIDENT_APPROVE(incidentId), {})
+  }
+
+  async rejectIncidentMain(incidentId, reason = '') {
+    return this.post(API_ENDPOINTS.INCIDENT_REJECT(incidentId), { reason })
   }
 
   // Demo Mode API methods (use demo control API)

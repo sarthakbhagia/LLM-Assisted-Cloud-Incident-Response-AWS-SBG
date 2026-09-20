@@ -1,10 +1,91 @@
+# -----------------------------------------------------------------------
+# AWS SAM / CloudFormation
+# -----------------------------------------------------------------------
 .aws-sam/
+samconfig.toml.bak
+
+# -----------------------------------------------------------------------
+# Python
+# -----------------------------------------------------------------------
 __pycache__/
-*.pyc
-.evaluation_tmp/
-.freebuff/
-dashboard/web/.env
+*.py[cod]
+*$py.class
+*.pyo
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.venv/
+venv/
+env/
+pip-wheel-metadata/
+
+# -----------------------------------------------------------------------
+# Node / Frontend
+# -----------------------------------------------------------------------
+node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
 dashboard/web/node_modules/
-env.json
+dist/
+
+# -----------------------------------------------------------------------
+# Environment and secrets (NEVER commit these)
+# -----------------------------------------------------------------------
 .env
 *.env
+.env.*
+!.env.example
+frontend/.env
+frontend/.env.*
+!frontend/.env.example
+env.json
+env.demo.json
+
+# -----------------------------------------------------------------------
+# AWS credentials and config
+# -----------------------------------------------------------------------
+.aws/
+*.pem
+*.key
+
+# -----------------------------------------------------------------------
+# IDE and editor
+# -----------------------------------------------------------------------
+.vscode/settings.json
+.vscode/launch.json
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# -----------------------------------------------------------------------
+# Logs and temp files
+# -----------------------------------------------------------------------
+*.log
+logs/
+.evaluation_tmp/
+.freebuff/
+tmp/
+scratch/
+
+# -----------------------------------------------------------------------
+# SAM local / Docker artifacts
+# -----------------------------------------------------------------------
+.aws-sam/
+
+# -----------------------------------------------------------------------
+# Evaluation outputs (large, auto-generated)
+# -----------------------------------------------------------------------
+evaluation/results/
+evaluation/tmp/
+fault_injection/tmp/

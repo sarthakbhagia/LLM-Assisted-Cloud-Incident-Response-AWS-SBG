@@ -64,7 +64,7 @@ export default function ReplayMode() {
       try {
         setListLoading(true)
         const data = await apiClient.getIncidents({ limit: 100 })
-        setIncidents(data.incidents || [])
+        setIncidents(data?.items || [])
       } catch (err) {
         console.error('Failed to fetch incidents:', err)
       } finally {
@@ -82,9 +82,23 @@ export default function ReplayMode() {
       try {
         setLoading(true)
         setError(null)
-        const data = await apiClient.getIncidentDetail(selectedId)
-        setIncident(data.incident)
-        setRawData(data.raw_data)
+        const [detailResult, evidenceResult] = await Promise.allSettled([
+          apiClient.getIncidentDetail(selectedId),
+          apiClient.getIncidentEvidence(selectedId),
+        ])
+        if (detailResult.status === 'fulfilled') {
+          const data = detailResult.value
+          const incidentObj = data?.incident_id ? data : (data?.incident ?? data)
+          setIncident(incidentObj)
+        } else {
+          throw detailResult.reason
+        }
+        if (evidenceResult.status === 'fulfilled') {
+          // Store full response: { incident_id, fault_class, s3_key, evidence: {...} }
+          setRawData(evidenceResult.value)
+        } else {
+          setRawData(null)
+        }
         setCurrentStage(0)
         setIsPlaying(false)
       } catch (err) {
