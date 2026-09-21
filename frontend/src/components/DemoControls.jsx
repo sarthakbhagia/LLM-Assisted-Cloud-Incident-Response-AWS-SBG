@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, Fragment } from 'react'
 import { AlertCircle, Server, Database, Share2, Loader2, CheckCircle, XCircle, Info, Shield } from 'lucide-react'
 import { apiClient } from '../config/api'
 
@@ -71,6 +71,8 @@ export default function DemoControls() {
   const [error, setError] = useState(null)
   const [showTracker, setShowTracker] = useState(false)
   const [pendingApproval, setPendingApproval] = useState(false)
+  const [rejectReason, setRejectReason] = useState('')
+  const [showRejectBox, setShowRejectBox] = useState(false)
 
   // Poll for active incident status
   useEffect(() => {
@@ -138,6 +140,23 @@ export default function DemoControls() {
       setPendingApproval(false)
     } catch (err) {
       setError(err.message || 'Failed to approve')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  // The approval handler persists the reason as remediation.rejected_reason
+  // (BACKEND_SPEC 5.2), so send it along when the reviewer provides one.
+  const handleReject = async () => {
+    if (!activeIncident?.incident_id) return
+    setLoading(true)
+    try {
+      await apiClient.rejectIncidentMain(activeIncident.incident_id, rejectReason.trim())
+      setShowRejectBox(false)
+      setRejectReason('')
+      setPendingApproval(false)
+    } catch (err) {
+      setError(err.message || 'Failed to reject')
     } finally {
       setLoading(false)
     }
@@ -217,7 +236,7 @@ export default function DemoControls() {
                   )}
                 </button>
                 {isDisabled && activeIncident && (
-                  <div className="absolute bottom-3 left-3 right-3 text-xs text-text-muted text-center">
+                  <div className="mt-2 text-[11px] text-text-muted text-center">
                     A demo is already running — see tracker below
                   </div>
                 )}
@@ -241,113 +260,197 @@ export default function DemoControls() {
           currentStage={currentStageIndex}
           stages={PIPELINE_STAGES}
           onApprove={pendingApproval ? handleApprove : null}
+          onReject={pendingApproval ? handleReject : null}
           isApproving={loading && pendingApproval}
+          isRejecting={loading && showRejectBox}
+          showRejectBox={showRejectBox}
+          rejectReason={rejectReason}
+          onRejectReasonChange={setRejectReason}
+          onToggleRejectBox={() => setShowRejectBox((v) => !v)}
         />
       )}
     </div>
   )
 }
 
-function PipelineTracker({ incident, currentStage, stages, onApprove, isApproving }) {
+function PipelineTracker({
+  incident,
+  currentStage,
+  stages,
+  onApprove,
+  onReject,
+  isApproving,
+  isRejecting,
+  showRejectBox,
+  rejectReason,
+  onRejectReasonChange,
+  onToggleRejectBox,
+}) {
   const faultClassLabel = {
     resource_exhaustion: 'Resource Exhaustion',
     misconfiguration: 'Misconfiguration',
     service_cascade: 'Service Cascade',
   }[incident.fault_class] || incident.fault_class
 
+  // Terminal outcomes: stop the stepper animation and show a final banner
+  // instead of leaving "Resolved" as a perpetually-pulsing current stage.
+  const verificationStatus = incident.verification?.status
+  const remediationStatus = incident.remediation?.status
+  const terminal =
+    verificationStatus === 'resolved' ? 'resolved'
+    : remediationStatus === 'rejected' ? 'rejected'
+    : (verificationStatus === 'not_resolved' || remediationStatus === 'failed') ? 'failed'
+    : null
+  const isTerminal = terminal !== null
+  const effectiveStage = isTerminal ? stages.length : currentStage
+
   return (
     <div className="card p-6">
-      <div className="flex items-center justify-between mb-6">
-        <div className="flex items-center space-x-3">
-          <div className="p-2 bg-crimson/10 rounded-lg">
+      <div className="flex items-center justify-between mb-6 gap-3 flex-wrap">
+        <div className="flex items-center space-x-3 min-w-0">
+          <div className="p-2 bg-crimson/10 rounded-lg flex-shrink-0">
             <AlertCircle className="w-5 h-5 text-crimson" />
           </div>
-          <div>
+          <div className="min-w-0">
             <h3 className="text-lg font-semibold text-text-primary">Pipeline Tracker</h3>
-            <p className="text-xs text-text-secondary">{faultClassLabel} • {incident.incident_id?.substring(0, 8)}</p>
+            <p className="text-xs text-text-secondary truncate">{faultClassLabel} • {incident.incident_id?.substring(0, 8)}</p>
           </div>
         </div>
         {incident.remediation?.status === 'pending_approval' && onApprove && (
-          <button onClick={onApprove} className="btn-primary text-sm flex items-center space-x-2">
-            {isApproving ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle className="w-4 h-4" />}
-            <span>Approve Fix</span>
-          </button>
+          <div className="flex items-center space-x-2 flex-shrink-0">
+            {showRejectBox ? (
+              <>
+                <button onClick={onReject} disabled={isRejecting} className="btn-danger text-sm flex items-center space-x-2 whitespace-nowrap">
+                  {isRejecting ? <Loader2 className="w-4 h-4 animate-spin" /> : <XCircle className="w-4 h-4" />}
+                  <span>Confirm Reject</span>
+                </button>
+                <button onClick={onToggleRejectBox} className="btn-ghost text-sm">Cancel</button>
+              </>
+            ) : (
+              <>
+                <button onClick={onToggleRejectBox} className="btn-danger text-sm flex items-center space-x-2 whitespace-nowrap">
+                  <XCircle className="w-4 h-4" />
+                  <span>Reject</span>
+                </button>
+                <button onClick={onApprove} disabled={isApproving} className="btn-success text-sm flex items-center space-x-2 whitespace-nowrap">
+                  {isApproving ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle className="w-4 h-4" />}
+                  <span>Approve Fix</span>
+                </button>
+              </>
+            )}
+          </div>
         )}
       </div>
 
-      {/* Horizontal Stepper */}
-      <div className="overflow-x-auto">
-        <div className="flex items-start min-w-max" style={{ minWidth: stages.length * 180 }}>
-          {stages.map((stage, index) => {
-            const isComplete = index < currentStage
-            const isCurrent = index === currentStage
-            const isFuture = index > currentStage
+      {/* Reject reason input — shown under the header buttons */}
+      {showRejectBox && onReject && (
+        <div className="mb-6 p-4 bg-bg-elevated border border-border-subtle rounded-card">
+          <label htmlFor="reject-reason" className="block text-xs font-medium text-text-secondary mb-2">
+            Why are you rejecting this fix? (saved to the incident record as <span className="mono">remediation.rejected_reason</span>)
+          </label>
+          <textarea
+            id="reject-reason"
+            value={rejectReason}
+            onChange={(e) => onRejectReasonChange(e.target.value)}
+            placeholder="e.g. Wrong service diagnosed — the cascade started at Service B, not C"
+            rows={3}
+            className="w-full bg-bg-input border border-border-default rounded-button px-3 py-2 text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:border-border-strong resize-none"
+          />
+        </div>
+      )}
 
-            return (
-              <div key={stage.key} className="flex flex-col items-center flex-shrink-0" style={{ minWidth: 180 }}>
-                {/* Vertical connector */}
-                <div className="flex flex-col items-center">
-                  {/* Step Circle */}
-                  <div className={`w-10 h-10 rounded-full flex items-center justify-center mx-auto transition-all duration-300 ${
-                    isComplete ? 'bg-emerald text-white' :
-                    isCurrent ? 'bg-amber text-white animate-pulse' :
-                    'bg-bg-base border-2 border-dashed border-border-subtle'
-                  }`}>
-                    {isComplete ? (
-                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" /></svg>
-                    ) : isCurrent ? (
-                      <div className="w-3 h-3 bg-white rounded-full animate-pulse" />
-                    ) : (
-                      <span className="text-xs text-text-muted font-mono">{index + 1}</span>
-                    )}
-                  </div>
-                  
-                  {/* Connector line */}
-                  {index < stages.length - 1 && (
-                    <div className={`w-px h-16 mt-2 ${
-                      isComplete || isCurrent ? 'bg-emerald' : 'bg-border-subtle'
-                    }`} />
+      {/* Horizontal Stepper — one continuous connector line running through
+          all nodes (the old version drew a dead-end line under each circle).
+          Stage captions live in the "Current Stage" panel below, so the nodes
+          stay compact and the whole line fits the card width. */}
+      <div className="overflow-x-auto -mx-1 px-1">
+        <div className="flex items-start w-full min-w-[600px]">
+        {stages.map((stage, index) => {
+          const isComplete = index < effectiveStage
+          const isCurrent = index === effectiveStage && !isTerminal
+          const isFuture = index > effectiveStage
+
+          return (
+            <Fragment key={stage.key}>
+              {/* Node + label */}
+              <div className="flex flex-col items-center flex-shrink-0 w-20 sm:w-24">
+                <div className={`w-9 h-9 rounded-full flex items-center justify-center transition-all duration-300 ${
+                  isComplete ? 'bg-emerald text-white' :
+                  isCurrent ? 'bg-amber text-white' :
+                  isTerminal && index === stages.length - 1 && terminal === 'rejected' ? 'bg-border-strong text-text-muted' :
+                  'bg-bg-base border-2 border-dashed border-border-subtle'
+                } ${isCurrent ? 'ring-4 ring-amber/20' : ''}`}>
+                  {isComplete ? (
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" /></svg>
+                  ) : isCurrent ? (
+                    <div className="w-2.5 h-2.5 bg-white rounded-full animate-pulse" />
+                  ) : (
+                    <span className="text-[11px] text-text-muted font-mono">{index + 1}</span>
                   )}
                 </div>
-
-                {/* Stage Label & Caption */}
-                <div className="mt-3 text-center px-2">
-                  <div className={`text-sm font-medium ${isCurrent ? 'text-text-primary' : isComplete ? 'text-emerald' : 'text-text-muted'}`}>
-                    {stage.label}
-                  </div>
-                  <p className="text-[11px] text-text-muted mt-1 leading-tight">
-                    {stage.caption}
-                  </p>
+                <div className={`mt-2 text-[11px] leading-tight text-center px-1 ${
+                  isCurrent ? 'text-text-primary font-medium' :
+                  isComplete ? 'text-emerald' :
+                  'text-text-muted'
+                }`}>
+                  {stage.label}
                 </div>
               </div>
-            )
-          })}
+
+              {/* Connector segment between nodes — solid emerald behind us,
+                  dashed ahead (per DESIGN_SPEC §5.7) */}
+              {index < stages.length - 1 && (
+                <div className="flex-1 min-w-3 flex justify-center" style={{ marginTop: 17 }}>
+                  <div className={`h-px w-full ${
+                    index < effectiveStage - 1 || (isComplete && effectiveStage >= stages.length)
+                      ? 'bg-emerald'
+                      : index === effectiveStage - 1
+                      ? 'bg-gradient-to-r from-emerald to-border-subtle'
+                      : 'border-t border-dashed border-border-subtle'
+                  }`} />
+                </div>
+              )}
+            </Fragment>
+          )
+        })}
         </div>
       </div>
 
+      {/* Terminal outcome banner */}
+      {isTerminal && (
+        <div className={`mt-6 p-4 rounded-card border ${
+          terminal === 'resolved' ? 'bg-emerald/10 border-emerald/20' :
+          terminal === 'rejected' ? 'bg-bg-elevated border-border-subtle' :
+          'bg-crimson/10 border-crimson/20'
+        }`}>
+          <p className={`text-xs font-medium ${
+            terminal === 'resolved' ? 'text-emerald' :
+            terminal === 'rejected' ? 'text-text-secondary' : 'text-crimson'
+          }`}>
+            {terminal === 'resolved' && 'Incident resolved — the original signal is back to normal. Pipeline complete.'}
+            {terminal === 'rejected' && 'Fix rejected by a human reviewer. The incident stays recorded with the rejection reason.'}
+            {terminal === 'failed' && 'Remediation did not resolve the incident — see the incident detail for the verification result.'}
+          </p>
+        </div>
+      )}
+
       {/* Current Stage Detail */}
-      {currentStage < stages.length && (
+      {!isTerminal && effectiveStage < stages.length && (
         <div className="mt-6 p-4 bg-bg-elevated rounded-card border border-border-subtle">
           <h4 className="text-sm font-medium text-text-primary mb-2">
-            Current Stage: {stages[currentStage].label}
+            Current Stage: {stages[effectiveStage].label}
           </h4>
-          <p className="text-sm text-text-secondary">{stages[currentStage].caption}</p>
+          <p className="text-sm text-text-secondary">{stages[effectiveStage].caption}</p>
           
-          {currentStage === 3 && (
+          {effectiveStage === 3 && (
             <div className="mt-4 p-3 bg-amber/10 border border-amber/20 rounded-card">
               <p className="text-xs text-amber font-medium">Action Required: Human approval needed to proceed with remediation.</p>
             </div>
           )}
           
-          {currentStage === 5 && (
+          {effectiveStage === 5 && (
             <div className="mt-4 p-3 bg-emerald/10 border border-emerald/20 rounded-card">
               <p className="text-xs text-emerald font-medium">Verifying the fix worked by re-checking the original alarm signal.</p>
-            </div>
-          )}
-          
-          {currentStage === 6 && (
-            <div className="mt-4 p-3 bg-emerald/10 border border-emerald/20 rounded-card">
-              <p className="text-xs text-emerald font-medium">Incident resolved — the signal is back to normal.</p>
             </div>
           )}
         </div>

@@ -17,6 +17,17 @@
     font-size: 13px; /* Base font size according to design spec */
   }
   
+  /* Keyboard focus — visible but restrained (no browser default blue) */
+  :focus-visible {
+    outline: 1px solid #3A3A3E;
+    outline-offset: 2px;
+  }
+
+  ::selection {
+    background: rgba(214, 60, 75, 0.35);
+    color: #F2F2F2;
+  }
+
   /* Custom scrollbars */
   ::-webkit-scrollbar {
     width: 6px;
@@ -48,6 +59,14 @@
   .btn-danger {
     @apply bg-crimson-surface border border-crimson/40 text-crimson;
     @apply hover:border-crimson/60;
+    @apply px-4 py-2 rounded-button text-sm font-medium h-7;
+    @apply transition-colors duration-75;
+  }
+  
+  /* Approval is a positive action — emerald, per spec's "crimson = danger only" */
+  .btn-success {
+    @apply bg-emerald-surface border border-emerald/40 text-emerald;
+    @apply hover:border-emerald/60;
     @apply px-4 py-2 rounded-button text-sm font-medium h-7;
     @apply transition-colors duration-75;
   }

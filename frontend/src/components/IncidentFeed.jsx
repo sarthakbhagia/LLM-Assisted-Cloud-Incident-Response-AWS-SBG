@@ -145,9 +145,9 @@ export default function IncidentFeed() {
         </div>
       ) : (
         <div className="card p-0 overflow-hidden border border-border-default">
-          <div className="overflow-x-auto">
+          <div className="overflow-x-auto max-h-[520px] overflow-y-auto">
             <table className="table">
-              <thead>
+              <thead className="sticky top-0 z-10">
                 <tr className="table-header">
                   <th className="table-cell text-left">Severity</th>
                   <th className="table-cell text-left">Incident ID</th>
@@ -217,9 +217,20 @@ export default function IncidentFeed() {
                       {/* AI Confidence */}
                       <td className="table-cell">
                         {confidenceLevel ? (
-                          <span className={`badge ${confidenceLevel.className}`}>
-                            {confidenceLevel.label} {Math.round((incident.diagnosis.confidence || 0) * 100)}%
-                          </span>
+                          <div className="flex flex-col space-y-1 min-w-[72px]">
+                            <span className={`badge ${confidenceLevel.className} self-start`}>
+                              {Math.round((incident.diagnosis.confidence || 0) * 100)}%
+                            </span>
+                            <div className="h-0.5 w-full bg-bg-elevated rounded-full overflow-hidden">
+                              <div
+                                className={`h-full rounded-full ${
+                                  confidenceLevel.label === 'High' ? 'bg-emerald' :
+                                  confidenceLevel.label === 'Medium' ? 'bg-amber' : 'bg-crimson'
+                                }`}
+                                style={{ width: `${Math.round((incident.diagnosis.confidence || 0) * 100)}%` }}
+                              />
+                            </div>
+                          </div>
                         ) : (
                           <span className="text-xs text-text-muted">—</span>
                         )}
@@ -231,11 +242,11 @@ export default function IncidentFeed() {
                           <button
                             onClick={(e) => handleInlineApprove(e, incident.incident_id)}
                             disabled={approvingId === incident.incident_id}
-                            className="btn-danger py-1 px-2 h-auto text-xs inline-flex items-center space-x-1"
+                            className="btn-success py-1 px-2 h-auto text-xs inline-flex items-center space-x-1"
                             title="Approve remediation"
                           >
                             <CheckSquare className="w-3.5 h-3.5" />
-                            <span>{approvingId === incident.incident_id ? 'Approving...' : 'Approve'}</span>
+                            <span>{approvingId === incident.incident_id ? 'Approving…' : 'Approve'}</span>
                           </button>
                         ) : (
                           <button

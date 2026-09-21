@@ -1,21 +1,63 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { NavLink, useLocation } from 'react-router-dom'
-import { 
+import {
   BarChart3, 
   Shield, 
   Activity, 
   Play, 
   User,
-  Menu,
-  X,
+  PanelLeft,
   List,
   Network,
   BookOpen
 } from 'lucide-react'
+import { apiClient } from '../config/api'
+import { POLLING_INTERVALS } from '../utils/constants'
 
 export default function Layout({ children }) {
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  // Narrow windows start collapsed so the 220px sidebar doesn't eat the content
+  // area (the full-page screenshot showed the content squeezed to ~350px).
+  const [isNarrow, setIsNarrow] = useState(
+    () => typeof window !== 'undefined' && window.innerWidth < 1024
+  )
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(isNarrow)
+
+  useEffect(() => {
+    const onResize = () => {
+      const narrow = window.innerWidth < 1024
+      setIsNarrow(narrow)
+      if (narrow !== isNarrow) setSidebarCollapsed(narrow)
+    }
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  }, [isNarrow])
+
   const location = useLocation()
+
+  // Real backend connectivity + a clock that actually ticks (both were
+  // previously static values rendered once at mount).
+  const [apiHealthy, setApiHealthy] = useState(null)
+  const [clock, setClock] = useState(() => new Date().toLocaleTimeString())
+
+  useEffect(() => {
+    let cancelled = false
+    const checkHealth = async () => {
+      try {
+        await apiClient.getHealth()
+        if (!cancelled) setApiHealthy(true)
+      } catch {
+        if (!cancelled) setApiHealthy(false)
+      }
+    }
+    checkHealth()
+    const healthTimer = setInterval(checkHealth, POLLING_INTERVALS.INCIDENTS_FEED)
+    const clockTimer = setInterval(() => setClock(new Date().toLocaleTimeString()), 30000)
+    return () => {
+      cancelled = true
+      clearInterval(healthTimer)
+      clearInterval(clockTimer)
+    }
+  }, [])
 
   const navigation = [
     { name: 'Overview', href: '/', icon: Activity },
@@ -45,7 +87,7 @@ export default function Layout({ children }) {
       {/* Sidebar */}
       <div
         className="transition-all duration-200 bg-bg-sidebar border-r border-border-default flex flex-col flex-shrink-0"
-        style={{ width: sidebarCollapsed ? 56 : 200 }}
+        style={{ width: sidebarCollapsed ? 56 : 220 }}
       >
         {/* Logo and Title */}
         <div className="p-4 border-b border-border-default">
@@ -54,7 +96,7 @@ export default function Layout({ children }) {
               <Shield className="w-4 h-4 text-bg-base" />
             </div>
             {!sidebarCollapsed && (
-              <span className="text-sm font-medium text-text-primary whitespace-nowrap overflow-hidden">
+              <span className="text-sm font-medium text-text-primary whitespace-nowrap overflow-hidden tracking-tight">
                 Incident Command
               </span>
             )}
@@ -97,7 +139,7 @@ export default function Layout({ children }) {
             </div>
             {!sidebarCollapsed && (
               <div className="flex-1 min-w-0">
-                <div className="text-xs text-text-primary font-medium">Production</div>
+                <div className="text-xs text-text-primary font-medium">Staging</div>
                 <div className="text-xs text-text-muted">ap-south-1</div>
               </div>
             )}
@@ -105,13 +147,13 @@ export default function Layout({ children }) {
           
           <button
             onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
-            className="mt-3 w-full flex items-center justify-center p-1 hover:bg-bg-elevated rounded"
+            title={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+            aria-label={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+            className="mt-3 w-full flex items-center justify-center p-1.5 hover:bg-bg-elevated rounded text-text-secondary hover:text-text-primary transition-colors"
           >
-            {sidebarCollapsed ? (
-              <Menu className="w-4 h-4 text-text-secondary" />
-            ) : (
-              <X className="w-4 h-4 text-text-secondary" />
-            )}
+            <PanelLeft className={`w-4 h-4 transition-transform duration-200 ${
+              sidebarCollapsed ? '' : 'scale-x-[-1]'
+            }`} />
           </button>
         </div>
       </div>
@@ -120,21 +162,25 @@ export default function Layout({ children }) {
       <div className="flex-1 flex flex-col min-w-0">
         {/* Header */}
         <header className="bg-bg-base border-b border-border-subtle h-12 flex items-center justify-between px-6 flex-shrink-0">
-          <h1 className="text-base font-semibold text-text-primary">
+          <h1 className="text-base font-semibold text-text-primary tracking-tight">
             {getPageTitle()}
           </h1>
           
           <div className="flex items-center space-x-4">
-            <div className="flex items-center space-x-2">
-              <div className="w-2 h-2 bg-emerald rounded-full"></div>
-              <span className="text-xs text-text-secondary">Live</span>
+            <div className="flex items-center space-x-2 whitespace-nowrap">
+              <div className={`w-2 h-2 rounded-full ${
+                apiHealthy === null ? 'bg-border-strong' : apiHealthy ? 'bg-emerald' : 'bg-crimson'
+              }`}></div>
+              <span className="text-xs text-text-secondary">
+                {apiHealthy === null ? 'Checking…' : apiHealthy ? 'Live' : 'Backend offline'}
+              </span>
             </div>
             
-            <div className="text-xs text-text-muted">
-              Last updated {new Date().toLocaleTimeString()}
+            <div className="text-xs text-text-muted whitespace-nowrap hidden md:block">
+              Updated {clock}
             </div>
             
-            <div className="w-8 h-8 bg-bg-elevated rounded-full flex items-center justify-center">
+            <div className="w-8 h-8 bg-bg-elevated rounded-full flex items-center justify-center flex-shrink-0">
               <User className="w-4 h-4 text-text-secondary" />
             </div>
           </div>
@@ -142,7 +188,7 @@ export default function Layout({ children }) {
 
         {/* Page Content */}
         <main className="flex-1 p-6 overflow-auto">
-          <div className="max-w-7xl mx-auto w-full">
+          <div className="max-w-[1120px] mx-auto w-full">
             {children}
           </div>
         </main>

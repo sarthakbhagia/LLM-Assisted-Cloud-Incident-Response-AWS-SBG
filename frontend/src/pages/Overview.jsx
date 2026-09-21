@@ -13,6 +13,7 @@ export default function Overview() {
     recoverySuccessRate: 0,
     averageMTTR: 0
   })
+  const [incidents, setIncidents] = useState([])
   const [recentResolved, setRecentResolved] = useState([])
   const [loading, setLoading] = useState(true)
   const [toast, setToast] = useState(null)
@@ -64,6 +65,7 @@ export default function Overview() {
         recoverySuccessRate,
         averageMTTR
       })
+      setIncidents(incidents)
 
       const sorted = [...incidents]
         .filter(i => i.verification?.status === 'resolved' && i.verification?.checked_at)
@@ -157,16 +159,16 @@ export default function Overview() {
             <div className="flex items-center justify-between mb-6">
               <h2 className="text-lg font-semibold text-text-primary">Incident Feed</h2>
               <div className="text-xs text-text-secondary">
-                Live polling every 5s across all services
+                Live polling every {POLLING_INTERVALS.INCIDENTS_FEED / 1000}s across all services
               </div>
             </div>
             <IncidentFeed />
           </div>
         </div>
 
-        {/* Right Panel - System Health */}
+        {/* Right Panel — Pipeline Health + Recent Actions */}
         <div className="space-y-4">
-          <SystemHealthCard />
+          <PipelineHealthCard incidents={incidents} loading={loading} />
           <RecentRemediationsCard incidents={recentResolved} />
         </div>
       </div>
@@ -176,13 +178,13 @@ export default function Overview() {
 
 function KPICard({ title, value, icon: Icon, iconColor, trend }) {
   return (
-    <div className="card">
+    <div className="card transition-colors duration-150 hover:border-border-strong">
       <div className="flex items-center justify-between">
         <div>
           <p className="text-xs text-text-secondary uppercase tracking-wide mb-1">
             {title}
           </p>
-          <p className="text-2xl font-semibold text-text-primary mb-1">
+          <p className="text-2xl font-semibold text-text-primary mb-1 tabular-nums">
             {value}
           </p>
           <p className="text-xs text-text-muted">
@@ -195,29 +197,52 @@ function KPICard({ title, value, icon: Icon, iconColor, trend }) {
   )
 }
 
-function SystemHealthCard() {
-  const services = [
-    { name: 'Service A', status: 'healthy' },
-    { name: 'Service B', status: 'healthy' },
-    { name: 'Service C', status: 'healthy' },
-    { name: 'Collector', status: 'healthy' },
-    { name: 'Diagnosis', status: 'healthy' }
+// Real pipeline throughput derived from the same incidents the feed uses —
+// replaces the previous hardcoded all-green "System Health" list.
+function PipelineHealthCard({ incidents = [], loading }) {
+  const total = incidents.length
+  const diagnosed = incidents.filter(i => i.diagnosis?.root_cause).length
+  const remediated = incidents.filter(
+    i => ['executed', 'resolved'].includes(i.remediation?.status) || i.verification?.status === 'resolved'
+  ).length
+  const verified = incidents.filter(i => i.verification?.status === 'resolved').length
+  const failed = incidents.filter(
+    i => i.remediation?.status === 'failed' || i.verification?.status === 'not_resolved'
+  ).length
+
+  const rows = [
+    { name: 'Diagnosed', value: diagnosed, dot: 'bg-purple-400' },
+    { name: 'Remediated', value: remediated, dot: 'bg-amber' },
+    { name: 'Verified OK', value: verified, dot: 'bg-emerald' },
+    { name: 'Failed', value: failed, dot: failed > 0 ? 'bg-crimson' : 'bg-border-strong' }
   ]
 
   return (
     <div className="card">
-      <h3 className="text-sm font-medium text-text-primary mb-4">System Health</h3>
-      <div className="space-y-3">
-        {services.map((service) => (
-          <div key={service.name} className="flex items-center justify-between">
-            <span className="text-xs text-text-secondary">{service.name}</span>
-            <div className="flex items-center space-x-2">
-              <div className="w-2 h-2 bg-emerald rounded-full"></div>
-              <span className="text-xs text-emerald">Healthy</span>
+      <h3 className="text-sm font-medium text-text-primary mb-4">Pipeline Health</h3>
+      {total === 0 ? (
+        <p className="text-xs text-text-muted py-4 text-center">
+          {loading ? 'Loading…' : 'No incident data yet'}
+        </p>
+      ) : (
+        <div className="space-y-3">
+          {rows.map((row) => (
+            <div key={row.name} className="flex items-center justify-between">
+              <span className="text-xs text-text-secondary flex items-center space-x-2">
+                <span className={`w-2 h-2 rounded-full ${row.dot}`}></span>
+                {row.name}
+              </span>
+              <span className="text-xs text-text-primary mono tabular-nums">
+                {row.value}
+                <span className="text-text-muted"> / {total}</span>
+              </span>
             </div>
-          </div>
-        ))}
-      </div>
+          ))}
+          <p className="text-[11px] text-text-muted pt-1 border-t border-border-subtle">
+            Last {total} incidents
+          </p>
+        </div>
+      )}
     </div>
   )
 }
