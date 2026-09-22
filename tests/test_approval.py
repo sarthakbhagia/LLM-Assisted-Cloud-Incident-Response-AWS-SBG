@@ -91,10 +91,21 @@ class FakeTable:
                 {"Error": {"Code": "ConditionalCheckFailedException", "Message": "condition failed"}},
                 "UpdateItem",
             )
-        remediation = dict(self.items[incident_id]["remediation"])
-        remediation[status_field] = ExpressionAttributeValues[":new_status"]
-        remediation[ExpressionAttributeNames["#decided_at"]] = ExpressionAttributeValues[":decided_at"]
-        self.items[incident_id]["remediation"] = remediation
+        # Apply every SET assignment generically (the handler may also SET
+        # approved_by / rejected_reason — BACKEND_SPEC 5.2). Mutates the live
+        # item dict; setdefault creates nested maps when absent.
+        set_clause = UpdateExpression.split("SET", 1)[1]
+        for part in set_clause.split(","):
+            lhs, rhs = part.split("=", 1)
+            attr_expr = lhs.strip()
+            value = ExpressionAttributeValues[rhs.strip()]
+            for placeholder, real in ExpressionAttributeNames.items():
+                attr_expr = attr_expr.replace(placeholder, real)
+            segments = attr_expr.split(".")  # e.g. ["remediation", "status"]
+            target = self.items[incident_id]
+            for seg in segments[:-1]:
+                target = target.setdefault(seg, {})
+            target[segments[-1]] = value
         return {}
 
     def get_item(self, Key, ProjectionExpression=None, ExpressionAttributeNames=None):
@@ -188,6 +199,50 @@ class ApprovalHandlerCase(Fixture):
         self.assertIn("rejected", resp["body"])
         self.assertEqual(self.table.items[INC]["remediation"]["status"], "rejected")
         self.assertEqual(self.lamb.calls, [])
+
+    def test_reject_with_reason_persists_rejected_reason(self):
+        """BACKEND_SPEC 5.2: the dashboard Reject form sends a reason; the
+        endpoint must write remediation.rejected_reason."""
+        self._set_table(FakeTable({INC: pending_item()}))
+        self._set_ssm({"/llm-incident-response/approval-token-secret": SECRET})
+        self._set_lambda(FakeLambda())
+
+        resp = self.mod.lambda_handler(
+            api_event("reject", method="POST", body=json.dumps({
+                "incident_id": INC,
+                "action": "reject",
+                "token": signed(INC, "reject"),
+                "reason": "Diagnosis pointed at the wrong service",
+            })),
+            None,
+        )
+
+        self.assertEqual(resp["statusCode"], 200)
+        remediation = self.table.items[INC]["remediation"]
+        self.assertEqual(remediation["status"], "rejected")
+        self.assertEqual(remediation["rejected_reason"], "Diagnosis pointed at the wrong service")
+
+    def test_approve_with_approved_by_persists_approver(self):
+        """BACKEND_SPEC 5.2: optional approver identity is recorded."""
+        self._set_table(FakeTable({INC: pending_item()}))
+        self._set_ssm({"/llm-incident-response/approval-token-secret": SECRET})
+        self._set_lambda(FakeLambda())
+        self.mod.REMEDIATION_FUNCTION_NAME = REMEDIATION_FN
+
+        resp = self.mod.lambda_handler(
+            api_event("approve", method="POST", body=json.dumps({
+                "incident_id": INC,
+                "action": "approve",
+                "token": signed(INC, "approve"),
+                "approved_by": "demo-user",
+            })),
+            None,
+        )
+
+        self.assertEqual(resp["statusCode"], 200)
+        remediation = self.table.items[INC]["remediation"]
+        self.assertEqual(remediation["status"], "approved")
+        self.assertEqual(remediation["approved_by"], "demo-user")
 
     def test_decided_at_timestamp_written(self):
         self._set_table(FakeTable({INC: pending_item()}))

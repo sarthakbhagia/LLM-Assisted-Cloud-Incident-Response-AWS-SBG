@@ -86,7 +86,12 @@ def lambda_handler(event, context):
 
     # 2. Flip remediation.status — conditionally, so only the first caller wins
     new_status = "approved" if action == "approve" else "rejected"
-    updated = _update_remediation_status(incident_id, new_status)
+    updated = _update_remediation_status(
+        incident_id,
+        new_status,
+        approved_by=params.get("approved_by") or None,
+        rejected_reason=params.get("reason") or None,
+    )
 
     if updated == "conditional_failed":
         current = _get_current_status(incident_id)
@@ -167,6 +172,11 @@ def _parse_request(event: dict) -> tuple[dict | None, dict | None]:
     action = (params.get("action") or "").strip().lower()
     token = (params.get("token") or "").strip()
 
+    # Optional audit fields (BACKEND_SPEC 5.2): approver identity and the
+    # rejection reason submitted from the dashboard's Reject form.
+    approved_by = (params.get("approved_by") or "").strip()[:1000]
+    reason = (params.get("reason") or "").strip()[:1000]
+
     if not incident_id:
         return None, _response(400, {"error": "Missing incident_id."})
     if not re.fullmatch(r"[0-9a-fA-F-]{16,64}", incident_id):
@@ -174,7 +184,13 @@ def _parse_request(event: dict) -> tuple[dict | None, dict | None]:
     if action not in VALID_ACTIONS:
         return None, _response(400, {"error": f"Invalid action '{action}'. Must be one of: approve, reject."})
 
-    return {"incident_id": incident_id, "action": action, "token": token}, None
+    return {
+        "incident_id": incident_id,
+        "action": action,
+        "token": token,
+        "approved_by": approved_by,
+        "reason": reason,
+    }, None
 
 
 # ===========================================================================
@@ -221,31 +237,46 @@ def _get_approval_secret() -> str | None:
 # DynamoDB status transition (conditional — the guardrail gate)
 # ===========================================================================
 
-def _update_remediation_status(incident_id: str, new_status: str) -> str | None:
+def _update_remediation_status(
+    incident_id: str,
+    new_status: str,
+    approved_by: str | None = None,
+    rejected_reason: str | None = None,
+) -> str | None:
     """
     Conditionally set remediation.status from pending_approval to
-    approved/rejected. Returns the new status on success, "conditional_failed"
-    when the item was already processed, or None on error/no-item.
+    approved/rejected, optionally recording the approver identity and/or
+    rejection reason (BACKEND_SPEC 5.2 approval audit trail). Returns the new
+    status on success, "conditional_failed" when the item was already
+    processed, or None on error/no-item.
     """
     table = _dynamodb.Table(INCIDENTS_TABLE)
     now = datetime.now(timezone.utc).isoformat()
+    set_parts = [
+        "remediation.#st = :new_status",
+        "remediation.#decided_at = :decided_at",
+    ]
+    names = {"#st": "status", "#decided_at": "decided_at"}
+    values = {
+        ":pending": "pending_approval",
+        ":new_status": new_status,
+        ":decided_at": now,
+    }
+    if approved_by:
+        set_parts.append("remediation.#approved_by = :approved_by")
+        names["#approved_by"] = "approved_by"
+        values[":approved_by"] = approved_by
+    if rejected_reason:
+        set_parts.append("remediation.#rejected_reason = :rejected_reason")
+        names["#rejected_reason"] = "rejected_reason"
+        values[":rejected_reason"] = rejected_reason
     try:
         table.update_item(
             Key={"incident_id": incident_id},
-            UpdateExpression=(
-                "SET remediation.#st = :new_status, "
-                "remediation.#decided_at = :decided_at"
-            ),
+            UpdateExpression="SET " + ", ".join(set_parts),
             ConditionExpression="remediation.#st = :pending",
-            ExpressionAttributeNames={
-                "#st": "status",
-                "#decided_at": "decided_at",
-            },
-            ExpressionAttributeValues={
-                ":pending": "pending_approval",
-                ":new_status": new_status,
-                ":decided_at": now,
-            },
+            ExpressionAttributeNames=names,
+            ExpressionAttributeValues=values,
         )
         return new_status
     except ClientError as exc:

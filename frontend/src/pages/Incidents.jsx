@@ -398,7 +398,7 @@ function Select({ value, onChange, options }) {
 function StatusBadge({ statusKey, label }) {
   const styles = {
     detected: 'bg-border-strong text-text-secondary',
-    diagnosed: 'bg-[#1D1B36] text-[#7C7CFF] border border-[#7C7CFF]/30',
+    diagnosed: 'bg-violet-surface text-violet',
     pending_approval: 'badge-warning',
     approved: 'badge-success',
     executed: 'badge-success',

@@ -1,5 +1,14 @@
 // Status mappings and constants for the dashboard
 
+// Display identity shown in the UI (sidebar, topbar, greeting) until a real
+// auth/profile system exists. Swap this single constant when that lands.
+export const CURRENT_USER = {
+  name: 'John Doe',
+  firstName: 'John',
+  initials: 'JD',
+  role: 'Responder'
+}
+
 export const FAULT_CLASSES = {
   RESOURCE_EXHAUSTION: 'resource_exhaustion',
   MISCONFIGURATION: 'misconfiguration', 

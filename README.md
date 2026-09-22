@@ -108,7 +108,7 @@ LLM-Assisted-Cloud-Incident-Response-AWS-SBG/
 │   ├── resource_exhaustion.md
 │   ├── misconfiguration.md
 │   └── service_cascade.md
-├── tests/                         # Unit test suite (56 tests across all phases)
+├── tests/                         # Unit test suite (119 tests across all phases)
 │   ├── helpers.py                 # Shared test scaffolding with boto3 stubs
 │   ├── test_demo_app.py           # Phase 1 unit tests
 │   ├── test_collector.py          # Phase 3 unit tests
@@ -310,7 +310,7 @@ To switch the reporting/approval flow on:
    ```bash
    python3 -m unittest discover -s tests
    ```
-   56 tests covering all handlers with mocked boto3: approve/reject
+   119 tests covering all handlers with mocked boto3: approve/reject
    happy paths, bad/missing token, already-processed conflicts (409),
    malformed requests, Slack/SSM/DynamoDB failure degradation, and the
    signed-approval-link construction. Runs on plain Python 3.9+.

@@ -11,42 +11,54 @@ export default {
         'mono': ['JetBrains Mono', 'Fira Code', 'monospace']
       },
       colors: {
-        // Obsidian Command palette
+        // Light & Premium palette (approved design).
+        // Token names kept from the previous dark theme so existing
+        // utility classes across all pages restyle automatically.
         bg: {
-          base: '#050505',
-          sidebar: '#0B0B0D',
-          surface: '#111113',
-          elevated: '#1B1B1F',
-          input: '#141416'
+          base: '#F5F7FB',      // page background
+          sidebar: '#FFFFFF',
+          surface: '#FFFFFF',   // cards
+          elevated: '#FAFBFE',  // hover / inset panels
+          input: '#FFFFFF'
         },
         border: {
-          subtle: '#1E1E22',
-          default: '#2A2A2D',
-          strong: '#3A3A3E'
+          subtle: '#EDF0F6',
+          default: '#E7ECF3',
+          strong: '#D9E1EB'
         },
         text: {
-          primary: '#F2F2F2',
-          secondary: '#85858C',
-          muted: '#55555D',
-          inverted: '#050505',
-          code: '#A8C5DA'
+          primary: '#0B1220',   // ink
+          secondary: '#51607A', // body
+          muted: '#77839A',
+          inverted: '#FFFFFF',
+          code: '#475569'
         },
+        // Solid dark ink used for primary buttons / brand mark
+        ink: '#0B1220',
         crimson: {
-          DEFAULT: '#D63C4B',
-          surface: '#321419'
+          DEFAULT: '#E11D48',   // danger only (per design spec)
+          surface: '#FDEEF2'
         },
         amber: {
-          DEFAULT: '#F0A23A',
-          surface: '#2B2010'
+          DEFAULT: '#D97706',
+          surface: '#FDF3E3'
         },
         emerald: {
-          DEFAULT: '#46B887',
-          surface: '#0E2420'
+          DEFAULT: '#0C9B6C',
+          surface: '#E8F7F1'
+        },
+        indigo: {
+          DEFAULT: '#6366F1',   // active / focus accent
+          surface: '#EEF0FE'
+        },
+        violet: {
+          DEFAULT: '#7C3AED',
+          surface: '#F1EBFD'
         }
       },
       spacing: {
         '1': '4px',
-        '2': '8px', 
+        '2': '8px',
         '3': '12px',
         '4': '16px',
         '5': '20px',
@@ -56,10 +68,15 @@ export default {
         '12': '48px'
       },
       borderRadius: {
-        'card': '6px',
-        'badge': '4px',
-        'button': '5px',
-        'modal': '8px'
+        'card': '14px',
+        'badge': '999px',
+        'button': '10px',
+        'modal': '16px'
+      },
+      boxShadow: {
+        'card': '0 1px 2px rgba(15, 23, 42, 0.05)',
+        'lift': '0 10px 30px -12px rgba(15, 23, 42, 0.16)',
+        'drawer': '0 24px 70px -24px rgba(15, 23, 42, 0.35)'
       }
     },
   },

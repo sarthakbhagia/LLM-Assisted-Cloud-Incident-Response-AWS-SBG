@@ -282,6 +282,10 @@ All endpoints are wrapped in `{ data: ..., error: null }`. The frontend `ApiClie
 | GET | `/api/runbooks/:fault_class` | `{ fault_class, s3_key, content: "..." }` |
 | POST | `/demo/inject` | `{ incident_id, status }` |
 | POST | `/demo/approve/:id` | `{ success, message }` |
+| POST | `/api/incidents/:id/approve` | `{ status: "approved", incident_id, remediation_invoked, detail }` |
+| POST | `/api/incidents/:id/reject` | `{ status: "rejected", incident_id, detail }` |
+
+> Approve/reject via the dashboard (`/api/incidents/:id/approve|reject`) is served by `local_backend.py`, which routes to the real Phase 5 approval handler and signs the HMAC token from the SSM secret (`/llm-incident-response/approval-token-secret`). The deployed API Gateway currently exposes only the Slack-link flow (`GET/POST /approval`) and `/demo/approve/{id}`.
 
 > **Important field names:** The incidents list uses `items` (not `incidents`), and pagination uses `next_token` (not `cursor`). The detail endpoint returns the incident object directly (not nested under `.incident`). See `BACKEND_SPEC.md` Section 6 for the full contract.
 

@@ -1,132 +1,207 @@
-import { useState, useEffect, useCallback, Fragment } from 'react'
-import { AlertCircle, Server, Database, Share2, Loader2, CheckCircle, XCircle, Info, Shield } from 'lucide-react'
+import { useState, useEffect, useRef, useCallback } from 'react'
+import { AlertCircle, Server, Unlock, Share2, Loader2, CheckCircle, XCircle, Play, Zap } from 'lucide-react'
 import { apiClient } from '../config/api'
 
-// Plain-language fault class configurations
-const FAULT_CLASSES = [
+// Plain-language fault scenarios. The tone classes (rose/amber/violet) give
+// each card its own color identity per the approved Light & Premium design;
+// the script + alarm names are the real ones the demo Lambda uses.
+const DEMO_ENV = 'staging'
+const FAULTS = [
   {
     id: 'resource_exhaustion',
-    label: 'Overload a Server',
-    description: 'We\'ll spike CPU on one of our demo services until it trips an alarm.',
+    tone: 'rose',
+    num: 'FAULT 01',
     icon: Server,
-    color: 'text-crimson',
-    bgColor: 'bg-crimson/10 border-crimson/20',
+    iconColor: 'text-crimson',
+    name: 'Overload a Server',
+    description: "We'll spike CPU on one of our demo services until it trips an alarm.",
+    script: 'inject_resource_exhaustion.py',
+    alarm: `incident-service-a-resource-exhaustion-${DEMO_ENV}`,
     actionLabel: 'Break it',
   },
   {
     id: 'misconfiguration',
-    label: 'Leave a Storage Bucket Open to the Internet',
-    description: 'We\'ll remove the public access block on a demo S3 bucket to simulate a misconfiguration.',
-    icon: Database,
-    color: 'text-amber',
-    bgColor: 'bg-amber/10 border-amber/20',
+    tone: 'amber',
+    num: 'FAULT 02',
+    icon: Unlock,
+    iconColor: 'text-amber',
+    name: 'Expose an S3 Bucket',
+    description: "We'll remove the public access block on a demo bucket and let the config detector catch it.",
+    script: 'inject_misconfiguration.py',
+    alarm: `incident-public-s3-${DEMO_ENV}`,
     actionLabel: 'Expose it',
   },
   {
     id: 'service_cascade',
-    label: 'Crash a Service and Watch it Break its Neighbors',
-    description: 'We\'ll kill a downstream service to trigger cascading failures upstream.',
+    tone: 'violet',
+    num: 'FAULT 03',
     icon: Share2,
-    color: 'text-emerald',
-    bgColor: 'bg-emerald/10 border-emerald/20',
+    iconColor: 'text-violet',
+    name: 'Trigger a Cascade',
+    description: "We'll fail a downstream service and watch retry storms ripple upstream.",
+    script: 'inject_service_cascade.py',
+    alarm: `incident-service-cascade-${DEMO_ENV}`,
     actionLabel: 'Trigger cascade',
   },
 ]
 
 // Pipeline stages for the tracker
 const PIPELINE_STAGES = [
-  { key: 'detected', label: 'Detected', caption: 'An alarm fired — something unusual was detected in the cloud.' },
-  { key: 'collecting', label: 'Collecting Data', caption: 'Gathering logs, metrics, and traces from the affected services.' },
-  { key: 'diagnosing', label: 'Diagnosing', caption: 'An AI model is reading the incident data and a runbook to figure out what went wrong.' },
-  { key: 'pending_approval', label: 'Awaiting Approval', caption: 'The AI has a recommended fix. A human needs to approve it before anything changes in AWS.' },
-  { key: 'remediating', label: 'Remediating', caption: 'Executing the approved fix — restarting a service, scaling up, or locking a bucket.' },
-  { key: 'verifying', label: 'Verifying', caption: 'Re-checking the same alarm/metric that caught the problem, to confirm the fix actually worked.' },
-  { key: 'resolved', label: 'Resolved', caption: 'The signal is back to normal. Incident closed.' },
+  { key: 'detected', label: 'Detected' },
+  { key: 'collecting', label: 'Collecting' },
+  { key: 'diagnosing', label: 'Diagnosing' },
+  { key: 'pending_approval', label: 'Awaiting Approval' },
+  { key: 'remediating', label: 'Remediating' },
+  { key: 'verifying', label: 'Verifying' },
+  { key: 'resolved', label: 'Resolved' },
 ]
 
-// Map remediation/verification status to pipeline stage
-const STATUS_TO_STAGE = {
-  // Collector statuses
-  detected: 0,
-  // Diagnosis statuses
-  diagnosing: 2,
-  // Approval statuses
-  pending_approval: 3,
-  approved: 4,
-  // Remediation statuses
-  remediating: 4,
-  executed: 5,
-  failed: 5,
-  // Verification statuses
-  verifying: 5,
-  resolved: 6,
-  not_resolved: 6,
-  inconclusive: 6,
+const STAGE_CAPTIONS = {
+  0: 'An alarm fired — something unusual was detected in the cloud.',
+  1: 'Gathering logs, metrics, and traces from the affected services.',
+  2: 'An AI model is reading the incident data and a runbook to figure out what went wrong.',
+  3: 'The AI has a recommended fix. A human needs to approve it before anything changes in AWS.',
+  4: 'Executing the approved fix — restarting a service, scaling up, or locking a bucket.',
+  5: 'Re-checking the same alarm/metric that caught the problem, to confirm the fix worked.',
+  6: 'The signal is back to normal. Incident closed.',
 }
 
 export default function DemoControls() {
-  const [activeIncident, setActiveIncident] = useState(null)
-  const [incidentStatus, setIncidentStatus] = useState(null)
+  const [activeIncident, setActiveIncident] = useState(null) // { fault_class, startedAt } or the polled incident
+  const [latest, setLatest] = useState(null) // newest incident from the feed (status polling)
+  const [recent, setRecent] = useState([]) // top few incidents, for correlating an injection to its incident
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
-  const [showTracker, setShowTracker] = useState(false)
-  const [pendingApproval, setPendingApproval] = useState(false)
   const [rejectReason, setRejectReason] = useState('')
   const [showRejectBox, setShowRejectBox] = useState(false)
+  const [runningFault, setRunningFault] = useState(null) // fault id whose card shows "Running…"
+  const [logs, setLogs] = useState([])
 
-  // Poll for active incident status
+  const t0Ref = useRef(null)
+  const consoleRef = useRef(null)
+  const loggedRef = useRef({ incident: null, gate: null, terminal: null })
+
+  const pushLog = useCallback((text, cls = '') => {
+    const t0 = t0Ref.current || Date.now()
+    const s = (Date.now() - t0) / 1000
+    const m = Math.floor(s / 60)
+    const stamp = `${String(m).padStart(2, '0')}:${(s % 60).toFixed(1).padStart(4, '0')}`
+    setLogs(prev => [...prev.slice(-11), { t: stamp, text, cls }])
+  }, [])
+
   useEffect(() => {
+    if (consoleRef.current) consoleRef.current.scrollTop = consoleRef.current.scrollHeight
+  }, [logs])
+
+  // Poll the latest incidents — this is how the UI learns the injected fault
+  // got correlated into a real incident and progressed through the pipeline.
+  useEffect(() => {
+    let cancelled = false
     const pollStatus = async () => {
       try {
-        const data = await apiClient.getIncidents({ limit: 1, sort: 'detected_at', order: 'desc' })
-        const incidents = data?.items || []
-        if (incidents.length > 0) {
-          const latest = incidents[0]
-          const remediationStatus = latest.remediation?.status
-          const verificationStatus = latest.verification?.status
-          
-          // Determine if there's an active demo
-          const isActive = remediationStatus && !['resolved', 'rejected'].includes(remediationStatus) &&
-                          verificationStatus !== 'resolved'
-          
-          if (isActive && (!activeIncident || activeIncident.incident_id !== latest.incident_id)) {
-            setActiveIncident(latest)
-            setShowTracker(true)
-          } else if (!isActive && activeIncident) {
-            setActiveIncident(null)
-            setShowTracker(false)
-          }
-          
-          if (activeIncident && activeIncident.incident_id === latest.incident_id) {
-            setIncidentStatus(latest)
-          }
-          
-          // Check if approval is needed
-          if (remediationStatus === 'pending_approval' && !pendingApproval) {
-            setPendingApproval(true)
-          } else if (remediationStatus !== 'pending_approval') {
-            setPendingApproval(false)
-          }
+        const data = await apiClient.getIncidents({ limit: 5, sort: 'detected_at', order: 'desc' })
+        const items = data?.items || []
+        if (!cancelled) {
+          setLatest(items[0] || null)
+          setRecent(items)
         }
       } catch (err) {
         console.error('Failed to poll incident status:', err)
       }
     }
-    
     pollStatus()
     const interval = setInterval(pollStatus, 5000)
-    return () => clearInterval(interval)
-  }, [activeIncident, pendingApproval])
+    return () => { cancelled = true; clearInterval(interval) }
+  }, [])
 
-  const handleInjectFault = async (faultClass) => {
+  const isTerminalIncident = (inc) => {
+    const r = inc?.remediation?.status
+    const v = inc?.verification?.status
+    return v === 'resolved' || r === 'rejected' || v === 'not_resolved' || v === 'inconclusive' || r === 'failed'
+  }
+
+  // Console narration for pipeline milestones. Each milestone logs once
+  // (tracked in loggedRef, keyed by incident id).
+  const narrate = useCallback((inc) => {
+    if (!inc?.incident_id) return
+    const id = inc.incident_id
+    const rStatus = inc.remediation?.status
+    const vStatus = inc.verification?.status
+    if (loggedRef.current.incident !== id) {
+      loggedRef.current.incident = id
+      pushLog(`incident correlated · ${id.substring(0, 8)} · evidence → s3://…-${DEMO_ENV}/evidence/`, 'ok')
+    }
+    if (inc.diagnosis?.root_cause && !loggedRef.current.diagnosed) {
+      loggedRef.current.diagnosed = true
+      pushLog(`bedrock: diagnosis ready · confidence ${Math.round((inc.diagnosis.confidence || 0) * 100)}%`, 'hi')
+    }
+    if (rStatus === 'pending_approval' && loggedRef.current.gate !== id) {
+      loggedRef.current.gate = id
+      pushLog('⏸  HUMAN GATE — awaiting your decision below', 'hi')
+    }
+    const terminal =
+      vStatus === 'resolved' ? 'resolved'
+      : rStatus === 'rejected' ? 'rejected'
+      : (vStatus === 'not_resolved' || vStatus === 'inconclusive' || rStatus === 'failed') ? 'failed'
+      : null
+    if (terminal && loggedRef.current.terminal !== id) {
+      loggedRef.current.terminal = id
+      if (terminal === 'resolved') pushLog('signal re-checked · RESOLVED ✓', 'ok')
+      else if (terminal === 'rejected') pushLog('remediation halted · rejection reason recorded', 'bad')
+      else pushLog('verification: NOT RESOLVED · flagged for human follow-up', 'warn')
+    }
+  }, [pushLog])
+
+  // React to pipeline progress — ONLY after the user explicitly starts a
+  // demo in this session. The dashboard is read-only visualization per the
+  // project README: no demo tracker, banner, or "awaiting decision" state is
+  // shown on page load. (In-flight approvals are acted on via Slack links or
+  // the incident feed's explicit action buttons.)
+  useEffect(() => {
+    if (!latest) return
+
+    // (a) Waiting for correlation after an explicit injection: adopt the
+    // first recent incident of the SAME fault class detected AFTER the click.
+    // Matching on fault_class + time avoids grabbing a stale incident.
+    if (activeIncident && !activeIncident.incident_id && activeIncident.startedAt) {
+      const match = recent.find(
+        (i) =>
+          i.fault_class === activeIncident.fault_class &&
+          new Date(i.detected_at).getTime() >= activeIncident.startedAt - 5000 &&
+          !isTerminalIncident(i)
+      )
+      if (match) {
+        setActiveIncident(match)
+        narrate(match)
+      }
+      return
+    }
+
+    // (b) Keep the tracker fed with the freshest status of its incident.
+    if (activeIncident?.incident_id && latest.incident_id === activeIncident.incident_id) {
+      setActiveIncident(latest)
+      narrate(latest)
+    }
+  }, [latest, recent, activeIncident, narrate])
+
+  const handleInjectFault = async (fault) => {
+    if (loading || inFlight) return
     setLoading(true)
     setError(null)
+    t0Ref.current = Date.now()
+    loggedRef.current = { incident: null, gate: null, terminal: null, diagnosed: false }
+    setLogs([])
+    setRunningFault(fault.id)
+    pushLog(`→ triggering fault · ./fault_injection/${fault.script}`)
     try {
-      const response = await apiClient.injectFault(faultClass)
-      setActiveIncident({ fault_class: faultClass, ...response.data })
-      setShowTracker(true)
+      await apiClient.injectFault(fault.id)
+      pushLog(`${fault.alarm} → ALARM (demo injection)`, 'warn')
+      setTimeout(() => pushLog('collector: snapshotting metrics + logs + config…'), 1400)
+      setActiveIncident({ fault_class: fault.id, startedAt: Date.now() })
     } catch (err) {
       setError(err.message || 'Failed to inject fault')
+      setRunningFault(null)
+      t0Ref.current = null
     } finally {
       setLoading(false)
     }
@@ -135,9 +210,9 @@ export default function DemoControls() {
   const handleApprove = async () => {
     if (!activeIncident?.incident_id) return
     setLoading(true)
+    pushLog('✓ approved · executing remediation plan', 'ok')
     try {
       await apiClient.approveIncidentMain(activeIncident.incident_id)
-      setPendingApproval(false)
     } catch (err) {
       setError(err.message || 'Failed to approve')
     } finally {
@@ -150,11 +225,11 @@ export default function DemoControls() {
   const handleReject = async () => {
     if (!activeIncident?.incident_id) return
     setLoading(true)
+    pushLog(`✗ rejected${rejectReason.trim() ? ' · reason recorded' : ''} · back to diagnosis`, 'bad')
     try {
       await apiClient.rejectIncidentMain(activeIncident.incident_id, rejectReason.trim())
       setShowRejectBox(false)
       setRejectReason('')
-      setPendingApproval(false)
     } catch (err) {
       setError(err.message || 'Failed to reject')
     } finally {
@@ -162,299 +237,281 @@ export default function DemoControls() {
     }
   }
 
-  const getCurrentStageIndex = () => {
-    if (!incidentStatus) return 0
-    const remediationStatus = incidentStatus.remediation?.status
-    const verificationStatus = incidentStatus.verification?.status
-    
-    if (verificationStatus === 'resolved') return 6
-    if (verificationStatus === 'not_resolved' || verificationStatus === 'inconclusive') return 6
-    if (verificationStatus && verificationStatus !== 'not_run') return 5
-    if (remediationStatus === 'executed') return 5
-    if (remediationStatus === 'approved') return 4
-    if (remediationStatus === 'pending_approval') return 3
-    if (incidentStatus.diagnosis?.root_cause) return 2
-    return 0
+  const handleReset = () => {
+    setActiveIncident(null)
+    setRunningFault(null)
+    setLogs([])
+    t0Ref.current = null
+    loggedRef.current = { incident: null, gate: null, terminal: null, diagnosed: false }
   }
 
-  const currentStageIndex = getCurrentStageIndex()
+  // Derive tracker state from the freshest status of the active incident.
+  const incidentStatus =
+    activeIncident && latest && latest.incident_id === activeIncident.incident_id ? latest : activeIncident
+  const remediationStatus = incidentStatus?.remediation?.status
+  const verificationStatus = incidentStatus?.verification?.status
+  const pendingApproval =
+    activeIncident?.incident_id && remediationStatus === 'pending_approval'
+  const terminal =
+    verificationStatus === 'resolved' ? 'resolved'
+    : remediationStatus === 'rejected' ? 'rejected'
+    : (verificationStatus === 'not_resolved' || verificationStatus === 'inconclusive' || remediationStatus === 'failed') ? 'failed'
+    : null
+  const inFlight = Boolean(activeIncident) && !terminal
+  const currentStageIndex = getCurrentStageIndex(incidentStatus)
+
+  const phaseLabel = terminal
+    ? (terminal === 'resolved' ? 'Resolved' : terminal === 'rejected' ? 'Rejected' : 'Needs attention')
+    : pendingApproval ? 'Awaiting your decision'
+    : inFlight ? 'Pipeline running'
+    : 'Pipeline ready'
 
   return (
-    <div className="space-y-6">
-      {/* Safety Banner */}
-      <div className="card bg-amber/5 border-amber/20 p-4">
-        <div className="flex items-center space-x-3">
-          <Shield className="w-5 h-5 text-amber flex-shrink-0" />
-          <div>
-            <p className="text-sm font-medium text-amber">Live AWS Demo</p>
-            <p className="text-xs text-text-secondary">
-              These buttons trigger real, sandboxed infrastructure changes that this system then detects and fixes itself.
-            </p>
+    <div className="hero">
+      {/* Header row */}
+      <div className="flex items-start gap-4">
+        <div className="min-w-0">
+          <div className="hero-kicker">
+            <span className={`live-dot${inFlight ? ' !bg-amber' : ''}`} />
+            Live AWS Demo
           </div>
+          <h2 className="hero-title">Break it on purpose. Watch AI fix it.</h2>
+          <p className="hero-sub">
+            Trigger a real, sandboxed fault on staging. The pipeline detects it, collects evidence, diagnoses with
+            Bedrock — and asks you before it touches anything.
+          </p>
+        </div>
+        <div className="ml-auto flex-none">
+          <span className={`live-pill${inFlight && !pendingApproval ? ' busy' : ''}`}>
+            <span className="live-dot" />
+            {phaseLabel}
+          </span>
         </div>
       </div>
 
-      {/* Demo Controls */}
-      <div className="card p-6">
-        <h2 className="text-lg font-semibold text-text-primary mb-2">Trigger a Fault</h2>
-        <p className="text-sm text-text-secondary mb-6">
-          Choose a scenario below. Each button triggers a real AWS fault injection that the pipeline will detect, diagnose, and (with your approval) fix.
-        </p>
-
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-          {FAULT_CLASSES.map((fault) => {
-            const Icon = fault.icon
-            const isDisabled = loading || activeIncident
-            return (
-              <div
-                key={fault.id}
-                onClick={() => !isDisabled && handleInjectFault(fault.id)}
-                className={`card p-5 relative ${fault.bgColor} ${isDisabled ? 'opacity-50 cursor-not-allowed' : 'hover:border-border-strong hover:bg-opacity-20 cursor-pointer'} transition-all group`}
-              >
-                <div className="flex items-center space-x-3 mb-3">
-                  <div className={`p-3 rounded-lg ${fault.color} bg-opacity-10`}>
-                    <Icon className="w-6 h-6" />
-                  </div>
-                </div>
-                <h3 className="text-base font-semibold text-text-primary mb-1">{fault.label}</h3>
-                <p className="text-xs text-text-secondary mb-4 flex-1">{fault.description}</p>
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    if (!isDisabled) handleInjectFault(fault.id)
-                  }}
-                  disabled={isDisabled}
-                  className="w-full btn-primary text-sm disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  {loading && activeIncident?.fault_class === fault.id ? (
-                    <>
-                      <Loader2 className="w-4 h-4 animate-spin mr-2" />
-                      Injecting...
-                    </>
+      {/* Fault cards — one color identity per fault */}
+      <div className="fault-grid">
+        {FAULTS.map((fault) => {
+          const Icon = fault.icon
+          const isDisabled = loading || inFlight
+          const isRunning = runningFault === fault.id || (inFlight && activeIncident?.fault_class === fault.id)
+          return (
+            <button
+              key={fault.id}
+              className={`fault-card ${fault.tone}${isRunning ? ' running' : ''}`}
+              disabled={isDisabled}
+              onClick={() => handleInjectFault(fault)}
+            >
+              <span className="fault-num">{fault.num}</span>
+              <span className="fault-ico">
+                <Icon className={`w-[22px] h-[22px] ${fault.iconColor}`} />
+              </span>
+              <span>
+                <span className="fault-name">{fault.name}</span>
+                <span className="fault-desc">{fault.description}</span>
+              </span>
+              <span className="fault-meta">
+                <span className="fault-script">{fault.script}</span>
+                <span className="fault-run">
+                  {isRunning ? (
+                    <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Running…</>
                   ) : (
-                    fault.actionLabel
+                    <>{fault.actionLabel} <Play className="w-2.5 h-2.5 fill-current" /></>
                   )}
-                </button>
-                {isDisabled && activeIncident && (
-                  <div className="mt-2 text-[11px] text-text-muted text-center">
-                    A demo is already running — see tracker below
-                  </div>
-                )}
-              </div>
-            )
-          })}
-        </div>
+                </span>
+              </span>
+            </button>
+          )
+        })}
+      </div>
 
-        {/* Error Message */}
-        {error && (
-          <div className="mt-4 p-3 bg-crimson/10 border border-crimson/20 rounded-card text-crimson text-sm">
-            {error}
+      {/* Error message */}
+      {error && (
+        <div className="mb-4 px-4 py-3 bg-crimson-surface border border-crimson/20 rounded-card text-crimson text-sm fade-up">
+          {error}
+        </div>
+      )}
+
+      {/* Live console — narrates the real pipeline events */}
+      <div className="console-frame">
+        <div className="console-bar">
+          <span className="console-dot" style={{ background: '#F26D6D' }} />
+          <span className="console-dot" style={{ background: '#F2C14E' }} />
+          <span className="console-dot" style={{ background: '#5EC26A' }} />
+          <span className="console-title">pipeline — {incidentStatus?.incident_id ? incidentStatus.incident_id.substring(0, 8) : 'idle'}</span>
+          {logs.length > 0 && <span className="console-live">● {terminal ? 'COMPLETE' : 'LIVE'}</span>}
+        </div>
+        {logs.length === 0 ? (
+          <div className="console console-idle">
+            Press <b>Break it</b>, <b>Expose it</b> or <b>Trigger cascade</b> — the pipeline narrates itself here.
+          </div>
+        ) : (
+          <div className="console" ref={consoleRef}>
+            {logs.map((l, i) => (
+              <div key={i}><span className="t">{l.t}</span><span className={l.cls}>{l.text}</span></div>
+            ))}
           </div>
         )}
       </div>
 
-      {/* Pipeline Tracker - always visible when demo is active */}
-      {showTracker && activeIncident && (
-        <PipelineTracker
-          incident={incidentStatus || activeIncident}
-          currentStage={currentStageIndex}
-          stages={PIPELINE_STAGES}
-          onApprove={pendingApproval ? handleApprove : null}
-          onReject={pendingApproval ? handleReject : null}
-          isApproving={loading && pendingApproval}
-          isRejecting={loading && showRejectBox}
-          showRejectBox={showRejectBox}
-          rejectReason={rejectReason}
-          onRejectReasonChange={setRejectReason}
-          onToggleRejectBox={() => setShowRejectBox((v) => !v)}
-        />
+      {/* Stepper + decision banner — only when a demo incident is active */}
+      {activeIncident && (
+        <>
+          <div className="stepper overflow-x-auto">
+            {PIPELINE_STAGES.map((stage, i) => {
+              const isComplete = terminal ? true : i < currentStageIndex
+              const isCurrent = !terminal && i === currentStageIndex
+              return (
+                <div
+                  key={stage.key}
+                  className={`step${isComplete ? ' done' : ''}${isCurrent ? ' active' : ''}${isCurrent && inFlight && !pendingApproval ? ' pulse' : ''}`}
+                  style={{ minWidth: 96 }}
+                >
+                  <div className="step-dot">
+                    {isComplete ? (
+                      <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
+                      </svg>
+                    ) : (
+                      i + 1
+                    )}
+                  </div>
+                  <div className="step-label">{stage.label}</div>
+                </div>
+              )
+            })}
+          </div>
+
+          {/* Human gate */}
+          {pendingApproval && !terminal && (
+            <div className="decision await">
+              <div className="min-w-0">
+                <div className="decision-txt">Human approval required</div>
+                <div className="decision-sub">
+                  {incidentStatus?.incident_id?.substring(0, 8)} — scoped, reversible fix proposed
+                  {incidentStatus?.diagnosis?.confidence != null &&
+                    ` at ${Math.round(incidentStatus.diagnosis.confidence * 100)}% confidence`}.
+                  Nothing executes until you decide.
+                </div>
+              </div>
+              {!showRejectBox && (
+                <div className="decision-actions">
+                  <button onClick={() => setShowRejectBox(true)} className="btn-danger">
+                    <XCircle className="w-4 h-4" /> Reject
+                  </button>
+                  <button onClick={handleApprove} disabled={loading} className="btn-success">
+                    {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle className="w-4 h-4" />} Approve fix
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Reject reason box — saved to the incident record as remediation.rejected_reason */}
+          {pendingApproval && showRejectBox && (
+            <div className="mt-3 p-4 bg-white border border-border-strong rounded-card fade-up">
+              <label htmlFor="reject-reason" className="block text-xs font-semibold text-text-secondary mb-2">
+                Why are you rejecting this fix? (saved to the incident as <span className="mono">remediation.rejected_reason</span>)
+              </label>
+              <textarea
+                id="reject-reason"
+                value={rejectReason}
+                onChange={(e) => setRejectReason(e.target.value)}
+                placeholder="e.g. Wrong service diagnosed — the cascade started at Service B, not C"
+                rows={3}
+                className="w-full bg-bg-elevated border border-border-default rounded-button px-3 py-2 text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:border-indigo resize-none"
+              />
+              <div className="flex justify-end gap-2 mt-3">
+                <button onClick={() => setShowRejectBox(false)} className="btn-ghost">Cancel</button>
+                <button onClick={handleReject} disabled={loading} className="btn-danger">
+                  {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <XCircle className="w-4 h-4" />} Confirm reject
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Remediation in progress */}
+          {!terminal && remediationStatus && ['approved', 'executed', 'remediating'].includes(remediationStatus) && !pendingApproval && (
+            <div className="decision done-ok">
+              <div>
+                <div className="decision-txt">✓ Approved — remediation running</div>
+                <div className="decision-sub">Executing the proposed fix and re-checking signals.</div>
+              </div>
+            </div>
+          )}
+
+          {/* Current stage caption while the pipeline works */}
+          {!terminal && !pendingApproval && !remediationStatus && (
+            <div className="decision" style={{ background: '#FAFBFE', border: '1px solid #E7ECF3' }}>
+              <div>
+                <div className="decision-txt">
+                  <Zap className="w-4 h-4 inline-block mr-1.5 -mt-0.5 text-indigo" />
+                  Current stage: {PIPELINE_STAGES[currentStageIndex].label}
+                </div>
+                <div className="decision-sub">{STAGE_CAPTIONS[currentStageIndex]}</div>
+              </div>
+            </div>
+          )}
+
+          {/* Terminal outcomes */}
+          {terminal === 'resolved' && (
+            <div className="decision done-ok">
+              <div>
+                <div className="decision-txt">✓ Resolved — the original signal is back to normal</div>
+                <div className="decision-sub">Pipeline complete. The incident is closed in the record.</div>
+              </div>
+              <div className="decision-actions">
+                <button onClick={handleReset} className="btn-ghost">New run</button>
+              </div>
+            </div>
+          )}
+          {terminal === 'rejected' && (
+            <div className="decision done-no">
+              <div>
+                <div className="decision-txt">✗ Rejected — reason recorded on the incident</div>
+                <div className="decision-sub">The fix was not executed. The incident stays recorded with your reason.</div>
+              </div>
+              <div className="decision-actions">
+                <button onClick={handleReset} className="btn-ghost">New run</button>
+              </div>
+            </div>
+          )}
+          {terminal === 'failed' && (
+            <div className="decision done-no">
+              <div>
+                <div className="decision-txt">Remediation did not resolve the incident</div>
+                <div className="decision-sub">See the incident detail for the verification result.</div>
+              </div>
+              <div className="decision-actions">
+                <button onClick={handleReset} className="btn-ghost">New run</button>
+              </div>
+            </div>
+          )}
+        </>
       )}
+
+      {/* Safety footnote */}
+      <div className="mt-5 flex items-center gap-2 text-xs text-text-muted">
+        <AlertCircle className="w-3.5 h-3.5" />
+        Faults are injected against the sandbox ({DEMO_ENV}) only — CloudWatch alarm states and Config rules, never
+        your production services. Auto-invoke of real AWS remediation on approve is off by default locally.
+      </div>
     </div>
   )
 }
 
-function PipelineTracker({
-  incident,
-  currentStage,
-  stages,
-  onApprove,
-  onReject,
-  isApproving,
-  isRejecting,
-  showRejectBox,
-  rejectReason,
-  onRejectReasonChange,
-  onToggleRejectBox,
-}) {
-  const faultClassLabel = {
-    resource_exhaustion: 'Resource Exhaustion',
-    misconfiguration: 'Misconfiguration',
-    service_cascade: 'Service Cascade',
-  }[incident.fault_class] || incident.fault_class
-
-  // Terminal outcomes: stop the stepper animation and show a final banner
-  // instead of leaving "Resolved" as a perpetually-pulsing current stage.
-  const verificationStatus = incident.verification?.status
+// Map remediation/verification status to pipeline stage index (0-6)
+function getCurrentStageIndex(incident) {
+  if (!incident) return 0
   const remediationStatus = incident.remediation?.status
-  const terminal =
-    verificationStatus === 'resolved' ? 'resolved'
-    : remediationStatus === 'rejected' ? 'rejected'
-    : (verificationStatus === 'not_resolved' || remediationStatus === 'failed') ? 'failed'
-    : null
-  const isTerminal = terminal !== null
-  const effectiveStage = isTerminal ? stages.length : currentStage
+  const verificationStatus = incident.verification?.status
 
-  return (
-    <div className="card p-6">
-      <div className="flex items-center justify-between mb-6 gap-3 flex-wrap">
-        <div className="flex items-center space-x-3 min-w-0">
-          <div className="p-2 bg-crimson/10 rounded-lg flex-shrink-0">
-            <AlertCircle className="w-5 h-5 text-crimson" />
-          </div>
-          <div className="min-w-0">
-            <h3 className="text-lg font-semibold text-text-primary">Pipeline Tracker</h3>
-            <p className="text-xs text-text-secondary truncate">{faultClassLabel} • {incident.incident_id?.substring(0, 8)}</p>
-          </div>
-        </div>
-        {incident.remediation?.status === 'pending_approval' && onApprove && (
-          <div className="flex items-center space-x-2 flex-shrink-0">
-            {showRejectBox ? (
-              <>
-                <button onClick={onReject} disabled={isRejecting} className="btn-danger text-sm flex items-center space-x-2 whitespace-nowrap">
-                  {isRejecting ? <Loader2 className="w-4 h-4 animate-spin" /> : <XCircle className="w-4 h-4" />}
-                  <span>Confirm Reject</span>
-                </button>
-                <button onClick={onToggleRejectBox} className="btn-ghost text-sm">Cancel</button>
-              </>
-            ) : (
-              <>
-                <button onClick={onToggleRejectBox} className="btn-danger text-sm flex items-center space-x-2 whitespace-nowrap">
-                  <XCircle className="w-4 h-4" />
-                  <span>Reject</span>
-                </button>
-                <button onClick={onApprove} disabled={isApproving} className="btn-success text-sm flex items-center space-x-2 whitespace-nowrap">
-                  {isApproving ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle className="w-4 h-4" />}
-                  <span>Approve Fix</span>
-                </button>
-              </>
-            )}
-          </div>
-        )}
-      </div>
-
-      {/* Reject reason input — shown under the header buttons */}
-      {showRejectBox && onReject && (
-        <div className="mb-6 p-4 bg-bg-elevated border border-border-subtle rounded-card">
-          <label htmlFor="reject-reason" className="block text-xs font-medium text-text-secondary mb-2">
-            Why are you rejecting this fix? (saved to the incident record as <span className="mono">remediation.rejected_reason</span>)
-          </label>
-          <textarea
-            id="reject-reason"
-            value={rejectReason}
-            onChange={(e) => onRejectReasonChange(e.target.value)}
-            placeholder="e.g. Wrong service diagnosed — the cascade started at Service B, not C"
-            rows={3}
-            className="w-full bg-bg-input border border-border-default rounded-button px-3 py-2 text-sm text-text-primary placeholder:text-text-muted focus:outline-none focus:border-border-strong resize-none"
-          />
-        </div>
-      )}
-
-      {/* Horizontal Stepper — one continuous connector line running through
-          all nodes (the old version drew a dead-end line under each circle).
-          Stage captions live in the "Current Stage" panel below, so the nodes
-          stay compact and the whole line fits the card width. */}
-      <div className="overflow-x-auto -mx-1 px-1">
-        <div className="flex items-start w-full min-w-[600px]">
-        {stages.map((stage, index) => {
-          const isComplete = index < effectiveStage
-          const isCurrent = index === effectiveStage && !isTerminal
-          const isFuture = index > effectiveStage
-
-          return (
-            <Fragment key={stage.key}>
-              {/* Node + label */}
-              <div className="flex flex-col items-center flex-shrink-0 w-20 sm:w-24">
-                <div className={`w-9 h-9 rounded-full flex items-center justify-center transition-all duration-300 ${
-                  isComplete ? 'bg-emerald text-white' :
-                  isCurrent ? 'bg-amber text-white' :
-                  isTerminal && index === stages.length - 1 && terminal === 'rejected' ? 'bg-border-strong text-text-muted' :
-                  'bg-bg-base border-2 border-dashed border-border-subtle'
-                } ${isCurrent ? 'ring-4 ring-amber/20' : ''}`}>
-                  {isComplete ? (
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" /></svg>
-                  ) : isCurrent ? (
-                    <div className="w-2.5 h-2.5 bg-white rounded-full animate-pulse" />
-                  ) : (
-                    <span className="text-[11px] text-text-muted font-mono">{index + 1}</span>
-                  )}
-                </div>
-                <div className={`mt-2 text-[11px] leading-tight text-center px-1 ${
-                  isCurrent ? 'text-text-primary font-medium' :
-                  isComplete ? 'text-emerald' :
-                  'text-text-muted'
-                }`}>
-                  {stage.label}
-                </div>
-              </div>
-
-              {/* Connector segment between nodes — solid emerald behind us,
-                  dashed ahead (per DESIGN_SPEC §5.7) */}
-              {index < stages.length - 1 && (
-                <div className="flex-1 min-w-3 flex justify-center" style={{ marginTop: 17 }}>
-                  <div className={`h-px w-full ${
-                    index < effectiveStage - 1 || (isComplete && effectiveStage >= stages.length)
-                      ? 'bg-emerald'
-                      : index === effectiveStage - 1
-                      ? 'bg-gradient-to-r from-emerald to-border-subtle'
-                      : 'border-t border-dashed border-border-subtle'
-                  }`} />
-                </div>
-              )}
-            </Fragment>
-          )
-        })}
-        </div>
-      </div>
-
-      {/* Terminal outcome banner */}
-      {isTerminal && (
-        <div className={`mt-6 p-4 rounded-card border ${
-          terminal === 'resolved' ? 'bg-emerald/10 border-emerald/20' :
-          terminal === 'rejected' ? 'bg-bg-elevated border-border-subtle' :
-          'bg-crimson/10 border-crimson/20'
-        }`}>
-          <p className={`text-xs font-medium ${
-            terminal === 'resolved' ? 'text-emerald' :
-            terminal === 'rejected' ? 'text-text-secondary' : 'text-crimson'
-          }`}>
-            {terminal === 'resolved' && 'Incident resolved — the original signal is back to normal. Pipeline complete.'}
-            {terminal === 'rejected' && 'Fix rejected by a human reviewer. The incident stays recorded with the rejection reason.'}
-            {terminal === 'failed' && 'Remediation did not resolve the incident — see the incident detail for the verification result.'}
-          </p>
-        </div>
-      )}
-
-      {/* Current Stage Detail */}
-      {!isTerminal && effectiveStage < stages.length && (
-        <div className="mt-6 p-4 bg-bg-elevated rounded-card border border-border-subtle">
-          <h4 className="text-sm font-medium text-text-primary mb-2">
-            Current Stage: {stages[effectiveStage].label}
-          </h4>
-          <p className="text-sm text-text-secondary">{stages[effectiveStage].caption}</p>
-          
-          {effectiveStage === 3 && (
-            <div className="mt-4 p-3 bg-amber/10 border border-amber/20 rounded-card">
-              <p className="text-xs text-amber font-medium">Action Required: Human approval needed to proceed with remediation.</p>
-            </div>
-          )}
-          
-          {effectiveStage === 5 && (
-            <div className="mt-4 p-3 bg-emerald/10 border border-emerald/20 rounded-card">
-              <p className="text-xs text-emerald font-medium">Verifying the fix worked by re-checking the original alarm signal.</p>
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  )
+  if (verificationStatus === 'resolved') return 6
+  if (verificationStatus === 'not_resolved' || verificationStatus === 'inconclusive') return 6
+  if (verificationStatus && verificationStatus !== 'not_run') return 5
+  if (remediationStatus === 'executed') return 5
+  if (remediationStatus === 'approved') return 4
+  if (remediationStatus === 'pending_approval') return 3
+  if (incident.diagnosis?.root_cause) return 2
+  return 0
 }

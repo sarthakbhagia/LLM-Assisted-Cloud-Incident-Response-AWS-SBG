@@ -163,11 +163,40 @@ def _approve_incident(incident_id: str) -> dict:
             "action": "approve",
             "token": token,
         }
-        _lambda.invoke(
+        resp = _lambda.invoke(
             FunctionName=APPROVAL_FUNCTION_NAME,
             InvocationType="RequestResponse",  # synchronous for demo
             Payload=json.dumps(invoke_payload),
         )
+
+        # The approval handler's result decides success. Previously the inner
+        # response was discarded, so a failed approval (bad token, DynamoDB
+        # denial, already-processed 409) still reported success to the caller
+        # while the incident stayed pending_approval.
+        raw = resp.get("Payload").read().decode("utf-8")
+        try:
+            inner = json.loads(raw) if raw else {}
+        except json.JSONDecodeError:
+            inner = {}
+        inner_status = int(inner.get("statusCode", 500) or 500)
+        if not 200 <= inner_status < 300:
+            try:
+                inner_error = (json.loads(inner.get("body") or "{}")).get("error")
+            except (json.JSONDecodeError, AttributeError):
+                inner_error = None
+            logger.error(
+                json.dumps({
+                    "event": "demo_approve_inner_failed",
+                    "incident_id": incident_id,
+                    "inner_status": inner_status,
+                    "inner_error": inner_error,
+                })
+            )
+            return {
+                "success": False,
+                "error": inner_error or f"Approval handler returned status {inner_status}",
+            }
+
         return {"success": True, "incident_id": incident_id}
 
     except ClientError as exc:
