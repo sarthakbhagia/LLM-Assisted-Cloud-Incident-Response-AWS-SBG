@@ -10,7 +10,8 @@ import {
   X,
   List,
   Network,
-  BookOpen
+  BookOpen,
+  HeartPulse
 } from 'lucide-react'
 
 export default function Layout({ children }) {
@@ -23,7 +24,8 @@ export default function Layout({ children }) {
     { name: 'Analytics', href: '/analytics', icon: BarChart3 },
     { name: 'Service Map', href: '/service-map', icon: Network },
     { name: 'Runbooks', href: '/runbooks', icon: BookOpen },
-    { name: 'Replay Mode', href: '/replay', icon: Play }
+    { name: 'Replay Mode', href: '/replay', icon: Play },
+    { name: 'System Health', href: '/system-health', icon: HeartPulse },
   ]
 
   const getPageTitle = () => {
@@ -34,6 +36,7 @@ export default function Layout({ children }) {
     if (path === '/service-map') return 'Service Map'
     if (path === '/runbooks') return 'Runbooks'
     if (path === '/replay') return 'Replay Mode'
+    if (path === '/system-health') return 'System Health'
     if (path.startsWith('/incidents/')) return 'Incident Detail'
     if (path.startsWith('/runbooks/')) return 'Runbook'
     if (path.startsWith('/replay/')) return 'Replay Mode'

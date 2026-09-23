@@ -7,6 +7,7 @@ import Analytics from './pages/Analytics'
 import ServiceMap from './pages/ServiceMap'
 import Runbooks from './pages/Runbooks'
 import ReplayMode from './pages/ReplayMode'
+import SystemHealth from './pages/SystemHealth'
 
 function App() {
   return (
@@ -21,6 +22,7 @@ function App() {
         <Route path="/runbooks/:fault_class" element={<Runbooks />} />
         <Route path="/replay" element={<ReplayMode />} />
         <Route path="/replay/:incidentId" element={<ReplayMode />} />
+        <Route path="/system-health" element={<SystemHealth />} />
       </Routes>
     </Layout>
   )
