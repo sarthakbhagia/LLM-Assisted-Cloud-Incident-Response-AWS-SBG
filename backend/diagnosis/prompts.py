@@ -1,7 +1,7 @@
 """
-prompts.py — Phase 4: Prompt Construction for Incident Diagnosis
+prompts.py - Phase 4: Prompt Construction for Incident Diagnosis
 
-Constructs system and user prompts for Bedrock Claude model execution,
+Constructs system and user prompts for Bedrock model execution (primary: Amazon Nova Pro),
 enforcing strict JSON response formatting matching the diagnosis output contract.
 """
 

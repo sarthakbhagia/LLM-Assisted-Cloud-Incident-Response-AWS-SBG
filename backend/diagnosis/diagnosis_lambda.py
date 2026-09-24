@@ -1,9 +1,10 @@
 """
-app.py — Phase 4: Diagnosis Lambda Handler
+app.py - Phase 4: Diagnosis Lambda Handler
 
 Receives incident payload from collector, reads raw_data.json from S3,
 loads runbook context (unless used_rag=false ablation flag is set),
-invokes AWS Bedrock Nova/Llama/Mistral model, validates JSON diagnosis, updates DynamoDB,
+invokes Amazon Bedrock (primary: Nova Pro, fallback chain: Llama 3 70B ->
+Mistral Large -> Nova Micro), validates JSON diagnosis, updates DynamoDB,
 and invokes notify Lambda.
 """
 
@@ -238,8 +239,8 @@ def _call_bedrock(prompt: str) -> tuple[str, str | None, bool]:
     logger.info("_call_bedrock: Starting execution")
 
     nova_payload = {
+        "system": [{"text": NOVA_SYSTEM_PROMPT}],
         "messages": [
-            {"role": "user", "content": [{"text": NOVA_SYSTEM_PROMPT}]},
             {"role": "user", "content": [{"text": prompt}]}
         ],
         "inferenceConfig": {"maxTokens": MAX_TOKENS, "temperature": 0.1},
@@ -397,9 +398,6 @@ def _call_bedrock(prompt: str) -> tuple[str, str | None, bool]:
         if is_truncated:
             logger.warning(f"Nova Micro output truncated (stop_reason={stop_reason})")
         return result, stop_reason, is_truncated
-    except Exception as final_exc:
-        logger.error(f"All models failed: {final_exc}")
-        raise RuntimeError("All Bedrock models failed")
     except Exception as final_exc:
         logger.error(f"All models failed: {final_exc}")
         raise RuntimeError("All Bedrock models failed")

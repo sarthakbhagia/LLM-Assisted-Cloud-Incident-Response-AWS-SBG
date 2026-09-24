@@ -370,7 +370,7 @@ function DiagnosisPanel({ incident, onRetrigger, retriggering, retriggerMessage 
       <div className="flex items-center justify-between mb-4">
         <div className="flex items-center space-x-2">
           <h3 className="text-sm font-medium text-text-primary">AI Diagnosis</h3>
-          <span className="badge badge-info text-xs">Claude 3.5 Sonnet</span>
+          <span className="badge badge-info text-xs">Amazon Nova Pro</span>
           {hasRootCause && !diagnosis.failure_mode && (
             <span className="badge badge-success text-xs">Schema validated</span>
           )}
@@ -402,7 +402,7 @@ function DiagnosisPanel({ incident, onRetrigger, retriggering, retriggerMessage 
           <AlertCircle className="w-4 h-4 text-crimson flex-shrink-0 mt-0.5" />
           <div>
             <p className="text-xs text-crimson font-medium">Diagnosis Failure Mode</p>
-            <p className="text-xs text-text-secondary mt-0.5">{diagnosis.failure_mode.replace(/_/g, ' ')}</p>
+            <p className="text-xs text-text-secondary mt-0.5">{diagnosis.failure_mode.split(':')[0].replace(/_/g, ' ')}</p>
           </div>
         </div>
       )}

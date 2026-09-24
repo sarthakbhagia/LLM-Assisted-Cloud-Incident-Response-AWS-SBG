@@ -13,6 +13,7 @@ export const API_ENDPOINTS = {
   INCIDENT_EVIDENCE: (id) => `/api/incidents/${id}/evidence`,
   INCIDENT_APPROVE: (id) => `/api/incidents/${id}/approve`,
   INCIDENT_REJECT: (id) => `/api/incidents/${id}/reject`,
+  INCIDENT_DIAGNOSE: (id) => `/api/incidents/${id}/diagnose`,
   ANALYTICS: '/api/analytics',
   RUNBOOKS: '/api/runbooks',
   RUNBOOK: (faultClass) => `/api/runbooks/${faultClass}`,
@@ -131,7 +132,7 @@ class ApiClient {
   }
 
   async triggerDiagnosis(incidentId) {
-    return this.post('/diagnose', { incident_id: incidentId })
+    return this.post(API_ENDPOINTS.INCIDENT_DIAGNOSE(incidentId), {})
   }
 }
 
