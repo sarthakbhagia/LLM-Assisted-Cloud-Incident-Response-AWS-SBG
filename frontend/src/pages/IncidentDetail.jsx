@@ -583,17 +583,19 @@ function EvidenceTabContent({ tab, data, faultClass }) {
       )
 
     case 'metrics': {
-      const metricsObj = evidence.cloudwatch_metrics || data.cloudwatch_metrics || {}
-      const metricNames = Object.keys(metricsObj)
+      // Backend collector writes evidence.metrics with keys: duration, errors, throttles, invocations
+      const metricsObj = evidence.metrics || data.metrics || {}
+      const metricNames = Object.keys(metricsObj).filter(k => Array.isArray(metricsObj[k]))
       if (metricNames.length === 0) {
         return <EvidenceEmpty message="No CloudWatch metrics data available for this incident" />
       }
 
       // Build time-series chart data
+      // Each metric entry is [{timestamp, value}, ...]
       const allTimestamps = new Set()
       metricNames.forEach(name => {
         const pts = metricsObj[name]
-        if (Array.isArray(pts)) pts.forEach(p => allTimestamps.add(p.Timestamp || p.timestamp))
+        if (Array.isArray(pts)) pts.forEach(p => allTimestamps.add(p.timestamp || p.Timestamp))
       })
 
       const sortedTs = Array.from(allTimestamps).filter(Boolean).sort()
@@ -602,18 +604,18 @@ function EvidenceTabContent({ tab, data, faultClass }) {
         metricNames.forEach(name => {
           const pts = metricsObj[name]
           if (Array.isArray(pts)) {
-            const pt = pts.find(p => (p.Timestamp || p.timestamp) === ts)
-            row[name] = pt ? (pt.Average ?? pt.Sum ?? pt.Maximum ?? pt.Value ?? null) : null
+            const pt = pts.find(p => (p.timestamp || p.Timestamp) === ts)
+            row[name] = pt ? (pt.value ?? pt.Average ?? pt.Sum ?? pt.Maximum ?? null) : null
           }
         })
         return row
       })
 
       const lineColors = [CHART_COLORS.primary, CHART_COLORS.amber, CHART_COLORS.emerald, CHART_COLORS.crimson]
-      // Threshold lines per known alarm
+      // Threshold lines per known metric name (lowercase as stored by collector)
       const THRESHOLDS = {
-        Duration: 50000,
-        Errors: 5,
+        duration: 50000,
+        errors: 5,
       }
 
       return (
