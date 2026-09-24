@@ -11,7 +11,10 @@ import {
   Clock,
   Eye,
   Search,
-  ExternalLink
+  ExternalLink,
+  Zap,
+  Loader2,
+  ArrowRight
 } from 'lucide-react'
 import { apiClient } from '../config/api'
 import { PIPELINE_STAGES, getConfidenceLevel } from '../utils/constants'
@@ -19,6 +22,232 @@ import {
   formatDate,
   getSeverityFromFaultClass
 } from '../utils/helpers'
+
+// ---------------------------------------------------------------------------
+// Demo Control Panel
+// ---------------------------------------------------------------------------
+
+const FAULT_TYPES = [
+  {
+    key: 'resource_exhaustion',
+    label: 'Resource Exhaustion',
+    severity: 'Critical',
+    severityClass: 'badge-critical',
+    description: 'Forces Service A Lambda Duration alarm into ALARM state. Simulates memory or compute exhaustion causing function timeouts.',
+    icon: '\u26a1',
+  },
+  {
+    key: 'service_cascade',
+    label: 'Service Cascade',
+    severity: 'High',
+    severityClass: 'badge-warning',
+    description: 'Fires the cascade alarm. Simulates Service C failing and propagating errors upstream through Service B to Service A.',
+    icon: '\uD83D\uDD17',
+  },
+  {
+    key: 'misconfiguration',
+    label: 'Misconfiguration',
+    severity: 'Medium',
+    severityClass: 'badge-info',
+    description: 'Triggers an AWS Config rule evaluation. Simulates a public S3 bucket or an overly-permissive IAM policy being detected.',
+    icon: '\uD83D\uDEE1\uFE0F',
+  },
+]
+
+const PIPELINE_STEPS = [
+  'CloudWatch alarm fires (or Config rule evaluates)',
+  'Collector Lambda gathers evidence - logs, metrics, Config findings',
+  'LLM diagnoses root cause and picks a suggested action',
+  'Incident appears here with status Pending Approval',
+  'Open the incident, review AI diagnosis, click Approve or Reject',
+]
+
+function DemoControlPanel({ onIncidentAppeared }) {
+  const [injecting, setInjecting] = useState(null)   // fault_class currently injecting
+  const [toast, setToast] = useState(null)             // { type: 'success'|'error', text }
+  const [polling, setPolling] = useState(false)
+  const [foundIncident, setFoundIncident] = useState(null)
+  const pollRef = useRef(null)
+  const snapshotRef = useRef(null)  // incident IDs before injection
+
+  const stopPolling = () => {
+    if (pollRef.current) {
+      clearInterval(pollRef.current)
+      pollRef.current = null
+    }
+  }
+
+  const handleInject = async (faultClass) => {
+    if (injecting) return
+    setInjecting(faultClass)
+    setToast(null)
+    setFoundIncident(null)
+    stopPolling()
+
+    // Snapshot current incident IDs so we can detect the new one
+    try {
+      const current = await apiClient.getIncidents({ limit: 100 })
+      snapshotRef.current = new Set((current?.items || []).map(i => i.incident_id))
+    } catch (_) {
+      snapshotRef.current = new Set()
+    }
+
+    try {
+      await apiClient.injectFault(faultClass)
+      setToast({
+        type: 'success',
+        text: `${faultClass.replace(/_/g, ' ')} fault injected. Watching for new incident (may take 10-30s)...`,
+      })
+      setPolling(true)
+
+      // Poll every 5 s for a new incident that wasn't in the snapshot
+      pollRef.current = setInterval(async () => {
+        try {
+          const fresh = await apiClient.getIncidents({ limit: 100 })
+          const newItem = (fresh?.items || []).find(
+            i => !snapshotRef.current.has(i.incident_id)
+          )
+          if (newItem) {
+            stopPolling()
+            setPolling(false)
+            setFoundIncident(newItem)
+            if (onIncidentAppeared) onIncidentAppeared(newItem.incident_id)
+          }
+        } catch (_) { /* silent - keep polling */ }
+      }, 5000)
+
+      // Stop polling after 3 minutes regardless
+      setTimeout(() => {
+        if (pollRef.current) {
+          stopPolling()
+          setPolling(false)
+          setToast(prev =>
+            prev?.type === 'success'
+              ? { type: 'error', text: 'Timed out waiting for incident to appear. Check backend logs.' }
+              : prev
+          )
+        }
+      }, 180000)
+    } catch (err) {
+      const msg = err?.message || 'Fault injection failed'
+      setToast({ type: 'error', text: msg })
+    } finally {
+      setInjecting(null)
+    }
+  }
+
+  useEffect(() => () => stopPolling(), [])
+
+  return (
+    <div className="card p-6 space-y-6">
+      {/* Header */}
+      <div>
+        <div className="flex items-center space-x-2 mb-1">
+          <Zap className="w-4 h-4 text-amber" />
+          <h2 className="text-base font-semibold text-text-primary">Demo Control</h2>
+        </div>
+        <p className="text-xs text-text-secondary">
+          Inject a synthetic fault into the real AWS monitoring layer. The full
+          pipeline runs end-to-end - collector, LLM diagnosis, and remediation approval.
+        </p>
+      </div>
+
+      {/* Fault type cards */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+        {FAULT_TYPES.map(ft => (
+          <button
+            key={ft.key}
+            id={`inject-${ft.key}`}
+            onClick={() => handleInject(ft.key)}
+            disabled={!!injecting}
+            className={`text-left p-4 rounded-card border transition-all duration-200 group
+              ${
+                injecting === ft.key
+                  ? 'border-amber/50 bg-amber-surface'
+                  : 'border-border-default hover:border-amber/40 hover:bg-bg-elevated'
+              }
+              disabled:opacity-60 disabled:cursor-not-allowed
+            `}
+          >
+            <div className="flex items-start justify-between mb-2">
+              <span className="text-lg" role="img" aria-label={ft.label}>{ft.icon}</span>
+              <span className={`badge ${ft.severityClass} text-xs`}>{ft.severity}</span>
+            </div>
+            <p className="text-sm font-medium text-text-primary mb-1">{ft.label}</p>
+            <p className="text-xs text-text-secondary leading-relaxed">{ft.description}</p>
+            <div className="mt-3 flex items-center space-x-1">
+              {injecting === ft.key ? (
+                <>
+                  <Loader2 className="w-3 h-3 text-amber animate-spin" />
+                  <span className="text-xs text-amber">Injecting...</span>
+                </>
+              ) : (
+                <>
+                  <Zap className="w-3 h-3 text-text-muted group-hover:text-amber transition-colors" />
+                  <span className="text-xs text-text-muted group-hover:text-text-primary transition-colors">Inject fault</span>
+                </>
+              )}
+            </div>
+          </button>
+        ))}
+      </div>
+
+      {/* Toast feedback */}
+      {toast && (
+        <div className={`p-3 rounded-card text-xs flex items-start space-x-2 ${
+          toast.type === 'success'
+            ? 'bg-emerald-surface border border-emerald/30 text-emerald'
+            : 'bg-crimson-surface border border-crimson/30 text-crimson'
+        }`}>
+          {toast.type === 'success'
+            ? <CheckCircle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
+            : <AlertTriangle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />}
+          <span>{toast.text}</span>
+        </div>
+      )}
+
+      {/* Polling status */}
+      {polling && !foundIncident && (
+        <div className="flex items-center space-x-2 text-xs text-text-secondary">
+          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+          <span>Watching for new incident to appear in DynamoDB...</span>
+        </div>
+      )}
+
+      {/* Found incident link */}
+      {foundIncident && (
+        <div className="p-3 rounded-card bg-emerald-surface border border-emerald/30 flex items-center justify-between">
+          <div>
+            <p className="text-xs text-emerald font-medium">Incident detected</p>
+            <p className="text-xs text-text-secondary mono mt-0.5">{foundIncident.incident_id}</p>
+          </div>
+          <a
+            href={`/incidents/${foundIncident.incident_id}`}
+            className="flex items-center space-x-1 text-xs text-emerald hover:underline"
+          >
+            <span>Open</span>
+            <ArrowRight className="w-3 h-3" />
+          </a>
+        </div>
+      )}
+
+      {/* Pipeline walkthrough */}
+      <div>
+        <p className="text-xs font-medium text-text-secondary uppercase tracking-wide mb-2">What happens next</p>
+        <ol className="space-y-1.5">
+          {PIPELINE_STEPS.map((step, i) => (
+            <li key={i} className="flex items-start space-x-2">
+              <span className="flex-shrink-0 w-4 h-4 rounded-full bg-bg-elevated border border-border-default text-xs text-text-muted flex items-center justify-center mt-0.5">
+                {i + 1}
+              </span>
+              <span className="text-xs text-text-secondary">{step}</span>
+            </li>
+          ))}
+        </ol>
+      </div>
+    </div>
+  )
+}
 
 // Stage reveal sequence: what becomes visible at each step
 const STAGE_LABELS = [
@@ -181,10 +410,13 @@ export default function ReplayMode() {
   if (!selectedId || !incident) {
     return (
       <div className="space-y-6">
+        {/* Demo Control Panel - always visible at top */}
+        <DemoControlPanel onIncidentAppeared={(id) => handleSelectIncident(id)} />
+
         <div className="card p-6">
-          <h1 className="text-lg font-semibold text-text-primary mb-1">Replay Mode</h1>
+          <h2 className="text-base font-semibold text-text-primary mb-1">Replay Mode</h2>
           <p className="text-sm text-text-secondary">
-            Step through a past incident's pipeline stages at a controlled pace.
+            Select a past incident below to step through its pipeline stages at a controlled pace.
           </p>
         </div>
 
@@ -221,6 +453,9 @@ export default function ReplayMode() {
 
   return (
     <div className="space-y-6">
+      {/* Demo Control Panel */}
+      <DemoControlPanel onIncidentAppeared={(id) => handleSelectIncident(id)} />
+
       {/* Replay Header & Controls */}
       <div className="card p-6">
         <div className="flex items-center justify-between mb-4">
