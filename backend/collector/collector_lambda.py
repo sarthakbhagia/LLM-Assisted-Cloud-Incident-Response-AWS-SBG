@@ -309,16 +309,24 @@ def _resolve_lambda_name(service_prefix: str) -> str | None:
     """
     List Lambda functions and return the one matching our service prefix.
     Uses the SAM naming convention: <stack>-<service>Function-<suffix>
+
+    Bug fix: previously created a fresh boto3.client("lambda") on every call,
+    ignoring the module-level _lambda client defined at line 39. The fresh client
+    had a different session context and its errors were caught silently by the
+    except ClientError, causing logs/metrics to be silently empty. Now uses the
+    same module-level _lambda client that all other Lambda API calls use.
     """
     try:
-        paginator = boto3.client("lambda").get_paginator("list_functions")
+        paginator = _lambda.get_paginator("list_functions")
         for page in paginator.paginate():
             for fn in page["Functions"]:
                 name = fn["FunctionName"]
                 if service_prefix.lower() in name.lower():
                     return name
     except ClientError as exc:
-        logger.warning(json.dumps({"event": "resolve_lambda_error", "error": str(exc)}, default=str))
+        logger.warning(json.dumps({"event": "resolve_lambda_error", "service_prefix": service_prefix, "error": str(exc)}, default=str))
+    except Exception as exc:
+        logger.error(json.dumps({"event": "resolve_lambda_unexpected_error", "service_prefix": service_prefix, "error": str(exc), "error_type": type(exc).__name__}, default=str))
     return None
 
 

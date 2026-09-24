@@ -486,10 +486,128 @@ def trigger_diagnosis(incident_id):
         return _json_resp(error=str(exc), status=500)
 
 
+# ---- Pipeline trace / debug route -----------------------------------------
+
+@main_app.route("/api/incidents/<incident_id>/trace", methods=["GET", "OPTIONS"])
+def get_incident_trace(incident_id):
+    """
+    Traceability endpoint: returns everything stored for this incident so the
+    operator can debug failures without opening the AWS console.
+
+    Response shape:
+    {
+      "incident_id": "...",
+      "dynamodb_record": { ...full DynamoDB item... },
+      "s3_artifacts": [
+        { "key": "incidents/.../raw_data.json", "size": 1234, "last_modified": "..." },
+        { "key": "incidents/.../llm_raw_response_initial_validation_error.json", ... },
+        ...
+      ],
+      "diagnosis_failure_detail": "full failure_mode string from DynamoDB",
+      "pipeline_summary": { ... }
+    }
+    """
+    if request.method == "OPTIONS":
+        return cors_preflight()
+    try:
+        s3 = boto3.client("s3")
+        ddb = boto3.resource("dynamodb").Table(os.environ["INCIDENTS_TABLE"])
+        bucket = os.environ["DATA_LAKE_BUCKET"]
+
+        # 1. Full DynamoDB record
+        resp = ddb.get_item(Key={"incident_id": incident_id})
+        item = resp.get("Item")
+        if not item:
+            return _json_resp(error=f"Incident {incident_id!r} not found", status=404)
+
+        # Convert Decimal to float for JSON serialization
+        import decimal
+        def _dec(obj):
+            if isinstance(obj, decimal.Decimal):
+                return float(obj)
+            raise TypeError
+
+        record = json.loads(json.dumps(item, default=_dec))
+
+        # 2. List all S3 objects under incidents/{incident_id}/
+        prefix = f"incidents/{incident_id}/"
+        s3_artifacts = []
+        try:
+            paginator = s3.get_paginator("list_objects_v2")
+            for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+                for obj in page.get("Contents", []):
+                    s3_artifacts.append({
+                        "key": obj["Key"],
+                        "size_bytes": obj["Size"],
+                        "last_modified": obj["LastModified"].isoformat(),
+                        "fetch_url": f"/api/incidents/{incident_id}/trace/artifact?key={obj['Key']}",
+                    })
+        except Exception as exc:
+            s3_artifacts = [{"error": str(exc)}]
+
+        # 3. Derive a plain-language pipeline summary
+        diagnosis = record.get("diagnosis") or {}
+        remediation = record.get("remediation") or {}
+        verification = record.get("verification") or {}
+
+        pipeline_summary = {
+            "evidence_collected": bool(record.get("raw_data_s3_key")),
+            "diagnosis_status": diagnosis.get("diagnosis_status", "unknown"),
+            "failure_mode_full": diagnosis.get("failure_mode"),          # full string, not truncated
+            "is_heuristic": diagnosis.get("is_heuristic", False),
+            "model_used": diagnosis.get("model_used", "unknown"),
+            "confidence": diagnosis.get("confidence"),
+            "suggested_action": diagnosis.get("suggested_action"),
+            "notify_failed": diagnosis.get("notify_failed", False),
+            "remediation_status": remediation.get("status"),
+            "action_taken": remediation.get("action_taken"),
+            "verification_status": verification.get("status"),
+            "verification_notes": verification.get("notes"),
+            "llm_artifacts": [a for a in s3_artifacts if "llm_raw_response" in a.get("key", "")],
+        }
+
+        return _json_resp(data={
+            "incident_id": incident_id,
+            "dynamodb_record": record,
+            "s3_artifacts": s3_artifacts,
+            "pipeline_summary": pipeline_summary,
+        })
+    except Exception as exc:
+        traceback.print_exc()
+        return _json_resp(error=str(exc), status=500)
+
+
+@main_app.route("/api/incidents/<incident_id>/trace/artifact", methods=["GET", "OPTIONS"])
+def get_trace_artifact(incident_id):
+    """
+    Fetch the content of a specific S3 artifact for this incident.
+    Query param: key (the full S3 key)
+    Returns the raw content as JSON or plain text.
+    """
+    if request.method == "OPTIONS":
+        return cors_preflight()
+    key = request.args.get("key", "")
+    if not key.startswith(f"incidents/{incident_id}/"):
+        return _json_resp(error="Key does not belong to this incident", status=403)
+    try:
+        s3 = boto3.client("s3")
+        bucket = os.environ["DATA_LAKE_BUCKET"]
+        obj = s3.get_object(Bucket=bucket, Key=key)
+        content = obj["Body"].read().decode("utf-8")
+        try:
+            parsed = json.loads(content)
+            return _json_resp(data={"key": key, "content": parsed, "content_type": "json"})
+        except json.JSONDecodeError:
+            return _json_resp(data={"key": key, "content": content, "content_type": "text"})
+    except Exception as exc:
+        traceback.print_exc()
+        return _json_resp(error=str(exc), status=500)
+
 
 # ---------------------------------------------------------------------------
 # AWS Health checks
 # ---------------------------------------------------------------------------
+
 
 def _probe(name: str, fn, critical: bool = True) -> dict:
     """Run a single probe function and capture latency + result."""

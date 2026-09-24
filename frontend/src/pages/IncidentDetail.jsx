@@ -365,7 +365,7 @@ function DiagnosisPanel({ incident, onRetrigger, retriggering, retriggerMessage 
   const hasRootCause = Boolean(diagnosis.root_cause)
   const confidence = getConfidenceLevel(diagnosis.confidence || 0)
   const [traceExpanded, setTraceExpanded] = useState(false)
-  
+  const incidentId = incident.incident_id
   return (
     <div className="card">
       <div className="flex items-center justify-between mb-4">
@@ -397,13 +397,19 @@ function DiagnosisPanel({ incident, onRetrigger, retriggering, retriggerMessage 
         )}
       </div>
 
-      {/* Failure mode banner */}
+      {/* Failure mode banner - shows full failure detail, not just the type prefix */}
       {diagnosis.failure_mode && (
         <div className="mb-4 p-3 bg-crimson-surface border border-crimson/30 rounded-card flex items-start space-x-2">
           <AlertCircle className="w-4 h-4 text-crimson flex-shrink-0 mt-0.5" />
-          <div>
-            <p className="text-xs text-crimson font-medium">Diagnosis Failure Mode</p>
-            <p className="text-xs text-text-secondary mt-0.5">{diagnosis.failure_mode.split(':')[0].replace(/_/g, ' ')}</p>
+          <div className="min-w-0">
+            <p className="text-xs text-crimson font-medium">
+              Diagnosis Failure Mode: {diagnosis.failure_mode.split(':')[0].replace(/_/g, ' ')}
+            </p>
+            {diagnosis.failure_mode.includes(':') && (
+              <p className="text-xs text-text-secondary mt-0.5 font-mono break-all">
+                {diagnosis.failure_mode.split(':').slice(1).join(':').trim()}
+              </p>
+            )}
           </div>
         </div>
       )}
@@ -520,6 +526,10 @@ function DiagnosisPanel({ incident, onRetrigger, retriggering, retriggerMessage 
               )}
             </div>
           )}
+
+          {/* Pipeline Trace debug panel */}
+          <PipelineTracePanel incidentId={incidentId} />
+
         </div>
       ) : (
         <div className="text-center py-8">
@@ -537,6 +547,140 @@ function DiagnosisPanel({ incident, onRetrigger, retriggering, retriggerMessage 
           >
             {retriggering ? 'Invoking Diagnosis...' : 'Re-trigger Diagnosis'}
           </button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function PipelineTracePanel({ incidentId }) {
+  const [open, setOpen] = useState(false)
+  const [trace, setTrace] = useState(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState(null)
+  const [artifactContent, setArtifactContent] = useState({}) // key -> content string
+
+  const fetchTrace = async () => {
+    if (open && trace) { setOpen(false); return }
+    setOpen(true)
+    setLoading(true)
+    setError(null)
+    try {
+      const resp = await fetch(`/api/incidents/${incidentId}/trace`)
+      const json = await resp.json()
+      if (json.error) throw new Error(json.error)
+      setTrace(json.data)
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const fetchArtifact = async (key) => {
+    if (artifactContent[key]) {
+      setArtifactContent(prev => ({ ...prev, [key]: prev[key] === '__hide__' ? null : '__hide__' }))
+      return
+    }
+    try {
+      const resp = await fetch(`/api/incidents/${incidentId}/trace/artifact?key=${encodeURIComponent(key)}`)
+      const json = await resp.json()
+      const content = json.data?.content
+      setArtifactContent(prev => ({
+        ...prev,
+        [key]: typeof content === 'string' ? content : JSON.stringify(content, null, 2)
+      }))
+    } catch (err) {
+      setArtifactContent(prev => ({ ...prev, [key]: `Error: ${err.message}` }))
+    }
+  }
+
+  const summary = trace?.pipeline_summary || {}
+
+  return (
+    <div className="border-t border-border-default pt-3 mt-1">
+      <button
+        onClick={fetchTrace}
+        className="flex items-center space-x-1 text-xs text-text-muted uppercase tracking-wide hover:text-text-primary transition-colors"
+      >
+        {open ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+        <span>Pipeline Trace</span>
+        <span className="text-text-muted normal-case tracking-normal">(debug)</span>
+      </button>
+
+      {open && (
+        <div className="mt-3 space-y-3">
+          {loading && <p className="text-xs text-text-muted">Loading trace...</p>}
+          {error && <p className="text-xs text-crimson font-mono">{error}</p>}
+          {trace && (
+            <>
+              {/* Pipeline summary table */}
+              <div className="grid grid-cols-2 gap-1.5 text-xs">
+                {[
+                  ['Diagnosis Status', summary.diagnosis_status],
+                  ['Model Used', summary.model_used],
+                  ['Is Heuristic', summary.is_heuristic ? 'YES' : 'No'],
+                  ['Confidence', summary.confidence != null ? `${Math.round(summary.confidence * 100)}%` : '-'],
+                  ['Suggested Action', summary.suggested_action],
+                  ['Notify Failed', summary.notify_failed ? 'YES' : 'No'],
+                  ['Remediation Status', summary.remediation_status],
+                  ['Verification Status', summary.verification_status],
+                ].map(([label, val]) => (
+                  <div key={label} className="contents">
+                    <span className="text-text-muted">{label}</span>
+                    <span className={`font-mono text-text-primary break-all ${
+                      (val === 'YES' || val === 'parse_failed') ? 'text-crimson' : ''
+                    }`}>{val ?? '-'}</span>
+                  </div>
+                ))}
+              </div>
+
+              {/* Full failure_mode string */}
+              {summary.failure_mode_full && (
+                <div className="p-2 bg-crimson-surface border border-crimson/20 rounded-card">
+                  <p className="text-xs text-text-muted mb-1">Full Failure Mode</p>
+                  <p className="text-xs font-mono text-crimson break-all">{summary.failure_mode_full}</p>
+                </div>
+              )}
+
+              {/* S3 artifacts */}
+              {trace.s3_artifacts?.length > 0 && (
+                <div>
+                  <p className="text-xs text-text-muted mb-1.5">S3 Artifacts ({trace.s3_artifacts.length})</p>
+                  <div className="space-y-1.5">
+                    {trace.s3_artifacts.map(a => (
+                      <div key={a.key} className="border border-border-default rounded-card overflow-hidden">
+                        <div className="flex items-center justify-between px-2 py-1.5 bg-bg-elevated">
+                          <span className="text-xs font-mono text-text-secondary truncate max-w-xs" title={a.key}>
+                            {a.key.split('/').pop()}
+                          </span>
+                          <div className="flex items-center space-x-2 flex-shrink-0">
+                            <span className="text-xs text-text-muted">{(a.size_bytes / 1024).toFixed(1)}kb</span>
+                            <button
+                              onClick={() => fetchArtifact(a.key)}
+                              className="text-xs text-accent hover:underline"
+                            >
+                              {artifactContent[a.key] && artifactContent[a.key] !== '__hide__' ? 'Hide' : 'View'}
+                            </button>
+                          </div>
+                        </div>
+                        {artifactContent[a.key] && artifactContent[a.key] !== '__hide__' && (
+                          <div className="max-h-64 overflow-y-auto bg-bg-input p-2">
+                            <pre className="text-xs font-mono text-text-code whitespace-pre-wrap break-all">
+                              {artifactContent[a.key]}
+                            </pre>
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {trace.s3_artifacts?.length === 0 && (
+                <p className="text-xs text-text-muted">No S3 artifacts found for this incident.</p>
+              )}
+            </>
+          )}
         </div>
       )}
     </div>

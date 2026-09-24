@@ -234,7 +234,14 @@ def _invoke_llm_with_validation(
                 if s3_key:
                     failure += f"; raw_saved_to_s3:{s3_key}"
             else:
+                # Traceability fix: save raw response on validation errors too.
+                # Previously only truncation saved the raw response, so when the LLM
+                # returned bad JSON or the wrong suggested_action value, there was no
+                # way to see what it actually returned. Now the raw text is always saved.
                 failure = f"{attempt_name.lower()}_validation_error: {exc}"
+                s3_key = _save_raw_response_to_s3(str(raw_resp), f"{attempt_name.lower()}_validation_error")
+                if s3_key:
+                    failure += f"; raw_saved_to_s3:{s3_key}"
             return None, raw_resp, failure
         except Exception as exc:  # noqa: BLE001
             return None, raw_resp, f"{attempt_name.lower()}_error: {exc}"
@@ -450,6 +457,16 @@ def _parse_and_validate_json(raw_text: str) -> dict:
         else:
             clean_text = clean_text.replace("```json", "").replace("```", "").strip()
 
+    # Extract bare JSON object when the LLM emits preamble text before the '{'
+    # (e.g. Nova Pro sometimes outputs '\n "root_cause"' or a sentence before the JSON).
+    # This fires even without markdown fences, so it covers the common case where
+    # json.loads would otherwise raise JSONDecodeError on the leading noise.
+    if not clean_text.startswith('{'):
+        start = clean_text.find('{')
+        end = clean_text.rfind('}')
+        if start != -1 and end != -1 and end > start:
+            clean_text = clean_text[start:end + 1]
+
     data = json.loads(clean_text)
 
     # Normalize keys: the LLM sometimes emits keys with leading/trailing
@@ -488,20 +505,41 @@ def _parse_and_validate_json(raw_text: str) -> dict:
 
     # Map suggested_action to valid values
     action_mapping = {
+        # Canonical values pass through as-is (LLM already used the right token)
+        "scale_up": "scale_up",
+        "restart_service": "restart_service",
+        "lock_s3_bucket": "lock_s3_bucket",
+        "tighten_iam_policy": "tighten_iam_policy",
+        "restart_downstream_service": "restart_downstream_service",
+        "manual_review_required": "manual_review_required",
+        # Human-phrase aliases the LLM sometimes emits
         "increase instance type": "scale_up",
         "scale out": "scale_up",
         "scale up": "scale_up",
         "add instances": "scale_up",
+        "increase concurrency": "scale_up",
+        "increase memory": "scale_up",
+        "adjust memory": "scale_up",
         "restart": "restart_service",
         "restart service": "restart_service",
         "terminate processes": "restart_service",
+        "force cold start": "restart_service",
+        "redeploy": "restart_service",
         "lock bucket": "lock_s3_bucket",
         "block public access": "lock_s3_bucket",
+        "s3 public access": "lock_s3_bucket",
         "tighten policy": "tighten_iam_policy",
         "restrict permissions": "tighten_iam_policy",
+        "update iam": "tighten_iam_policy",
+        "iam policy": "tighten_iam_policy",
+        "restrict iam": "tighten_iam_policy",
         "restart downstream": "restart_downstream_service",
+        "restart service c": "restart_downstream_service",
+        "restart service b": "restart_downstream_service",
         "manual review": "manual_review_required",
         "investigate manually": "manual_review_required",
+        "escalate": "manual_review_required",
+        "human review": "manual_review_required",
     }
     if suggested_action:
         suggested_action_lower = suggested_action.lower().strip()
@@ -515,11 +553,15 @@ def _parse_and_validate_json(raw_text: str) -> dict:
             f"Invalid 'suggested_action' {suggested_action!r}. Must be one of {VALID_SUGGESTED_ACTIONS}"
         )
 
+    # explanation and reasoning_trace are display-only fields - they do NOT need to be
+    # non-empty to accept the diagnosis. Raising ValueError here caused every LLM call
+    # where Nova returned a valid JSON but with a short/empty trace to fall back to the
+    # heuristic at 85% confidence, which is far worse than showing an empty trace.
     if not explanation or not isinstance(explanation, str):
-        raise ValueError("Missing or invalid 'explanation'")
+        explanation = "(no explanation provided by model)"
 
     if not reasoning_trace or not isinstance(reasoning_trace, str):
-        raise ValueError("Missing or invalid 'reasoning_trace'")
+        reasoning_trace = "(no reasoning trace provided by model)"
 
     return {
         "root_cause": root_cause,
@@ -622,7 +664,9 @@ def _update_dynamodb_diagnosis(
                 "diagnosis.#ur = :ur, "
                 "diagnosis.#fm = :fm, "
                 "diagnosis.#exp = :exp, "
-                "diagnosis.#ds = :ds"
+                "diagnosis.#ds = :ds, "
+                "diagnosis.#mu = :mu, "
+                "diagnosis.#ih = :ih"
             ),
             ExpressionAttributeNames={
                 "#rc": "root_cause",
@@ -634,6 +678,8 @@ def _update_dynamodb_diagnosis(
                 "#fm": "failure_mode",
                 "#exp": "explanation",
                 "#ds": "diagnosis_status",
+                "#mu": "model_used",
+                "#ih": "is_heuristic",
             },
             ExpressionAttributeValues={
                 ":rc": diagnosis_output["root_cause"],
@@ -645,6 +691,8 @@ def _update_dynamodb_diagnosis(
                 ":fm": failure_mode,
                 ":exp": diagnosis_output["explanation"],
                 ":ds": diagnosis_output.get("diagnosis_status", "success"),
+                ":mu": diagnosis_output.get("model_used", BEDROCK_MODEL_ID),
+                ":ih": bool(diagnosis_output.get("is_heuristic", False)),
             },
             ConditionExpression="attribute_exists(incident_id)"
         )
