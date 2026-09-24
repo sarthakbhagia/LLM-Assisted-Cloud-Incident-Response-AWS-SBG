@@ -255,20 +255,36 @@ def _collect_resource_exhaustion(parsed: dict, start_ms: int, end_ms: int) -> di
         "log_group": log_group,
     }
 
-    if log_group:
-        evidence["logs_insights"] = _run_logs_insights_query(
-            log_groups=[log_group],
-            query=(
-                "fields @timestamp, @message, @requestId, @duration, @billedDuration, @maxMemoryUsed "
-                "| filter @type = 'REPORT' or @message like /ERROR/ or @message like /Exception/ "
-                "| sort @timestamp desc "
-                "| limit 50"
-            ),
-            start_ms=start_ms,
-            end_ms=end_ms,
+    # SE-5: If the function name could not be resolved, record the reason explicitly in
+    # the evidence bundle so operators know why logs and metrics are missing, instead of
+    # silently omitting them and making the LLM diagnose from an incomplete bundle.
+    if not function_name:
+        evidence["evidence_collection_partial"] = True
+        evidence["evidence_collection_reason"] = (
+            f"Could not resolve Lambda function name from alarm name '{alarm_name}'. "
+            "This may be caused by an IAM permission denial on lambda:ListFunctions, "
+            "or because the function naming convention has changed. "
+            "Logs and metrics tabs in the Evidence Explorer will be empty."
         )
+        logger.warning(json.dumps({
+            "event": "function_name_resolution_failed",
+            "alarm_name": alarm_name,
+            "impact": "logs_insights and metrics will not be collected for this incident",
+        }))
+    else:
+        if log_group:
+            evidence["logs_insights"] = _run_logs_insights_query(
+                log_groups=[log_group],
+                query=(
+                    "fields @timestamp, @message, @requestId, @duration, @billedDuration, @maxMemoryUsed "
+                    "| filter @type = 'REPORT' or @message like /ERROR/ or @message like /Exception/ "
+                    "| sort @timestamp desc "
+                    "| limit 50"
+                ),
+                start_ms=start_ms,
+                end_ms=end_ms,
+            )
 
-    if function_name:
         evidence["metrics"] = _get_lambda_metrics(function_name, start_ms, end_ms)
 
     return evidence
@@ -307,7 +323,14 @@ def _resolve_lambda_name(service_prefix: str) -> str | None:
 
 
 def _get_lambda_metrics(function_name: str, start_ms: int, end_ms: int) -> dict:
-    """Fetch Duration, Errors, and Throttles for the Lambda function."""
+    """
+    Fetch Duration, Errors, Throttles, and Invocations for the Lambda function.
+
+    SE-6: Metric names are intentionally stored with lowercase keys (e.g. "duration",
+    "errors") to normalise the CloudWatch API's PascalCase names. Any consumer of
+    evidence.metrics (frontend Evidence Explorer, evaluation scripts, diagnosis prompts)
+    must use lowercase keys. Do NOT change this without updating all consumers.
+    """
     from datetime import datetime, timezone  # noqa: PLC0415
     start_dt = datetime.fromtimestamp(start_ms / 1000, tz=timezone.utc)
     end_dt = datetime.fromtimestamp(end_ms / 1000, tz=timezone.utc)
@@ -332,6 +355,7 @@ def _get_lambda_metrics(function_name: str, start_ms: int, end_ms: int) -> dict:
                 Statistics=[stat],
                 Unit=unit,
             )
+            # SE-6: lowercase key - matches what EvidenceTabContent reads in the frontend
             result[metric_name.lower()] = sorted(
                 [
                     {"timestamp": str(dp["Timestamp"]), "value": dp[stat]}

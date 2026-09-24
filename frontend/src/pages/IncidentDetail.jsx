@@ -44,8 +44,9 @@ const ACTION_LABELS = {
   lock_s3_bucket: 'Lock S3 Bucket (Block Public Access)',
   tighten_iam_policy: 'Tighten IAM Policy',
   scale_up: 'Scale Up Lambda Concurrency',
-  restart_service: 'Restart Service (Force New ECS Deployment)',
-  restart_downstream_service: 'Restart Downstream Service',
+  // SE-3: This bumps a Lambda env var to force a cold-start, NOT an ECS deployment.
+  restart_service: 'Restart Service (Force Lambda Cold-Start)',
+  restart_downstream_service: 'Restart Downstream Service (Force Lambda Cold-Start)',
   manual_review_required: 'Manual Review Required',
 }
 
@@ -407,6 +408,37 @@ function DiagnosisPanel({ incident, onRetrigger, retriggering, retriggerMessage 
         </div>
       )}
 
+      {/* SE-2: Heuristic diagnosis warning - shown when LLM was unavailable and a
+          pattern-matched fallback was used. Confidence is fixed at 30% in this case.
+          This banner makes the distinction visible instead of showing 85-90% bars. */}
+      {diagnosis.is_heuristic && (
+        <div className="mb-4 p-3 bg-amber-surface border border-amber/30 rounded-card flex items-start space-x-2">
+          <AlertTriangle className="w-4 h-4 text-amber flex-shrink-0 mt-0.5" />
+          <div>
+            <p className="text-xs text-amber font-medium">Heuristic Diagnosis</p>
+            <p className="text-xs text-text-secondary mt-0.5">
+              LLM was unavailable or produced unparseable output. This diagnosis was
+              pattern-matched from the fault class only - not from evidence. Confidence
+              is low (30%) and manual review is recommended before approving.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* SE-14: Notify failed warning - Slack alert was not sent */}
+      {diagnosis.notify_failed && (
+        <div className="mb-4 p-3 bg-amber-surface border border-amber/30 rounded-card flex items-start space-x-2">
+          <AlertTriangle className="w-4 h-4 text-amber flex-shrink-0 mt-0.5" />
+          <div>
+            <p className="text-xs text-amber font-medium">Slack Notification Failed</p>
+            <p className="text-xs text-text-secondary mt-0.5">
+              The on-call Slack message could not be sent. No engineer was automatically
+              notified. Manual approval is required from this dashboard.
+            </p>
+          </div>
+        </div>
+      )}
+
       {retriggerMessage && (
         <div className={`mb-4 p-2.5 rounded text-xs flex items-center space-x-2 ${
           retriggerMessage.type === 'success' ? 'bg-emerald-surface text-emerald' : 'bg-crimson-surface text-crimson'
@@ -534,6 +566,19 @@ function EvidenceExplorer({ rawData, faultClass, activeTab, onTabChange }) {
       <div className="flex items-center justify-between mb-4">
         <h3 className="text-sm font-medium text-text-primary">Evidence Explorer</h3>
       </div>
+
+      {/* SE-5: Show warning when function name resolution failed and logs/metrics are missing */}
+      {rawData?.evidence?.evidence_collection_partial && (
+        <div className="mb-4 p-3 bg-amber-surface border border-amber/30 rounded-card flex items-start space-x-2">
+          <AlertTriangle className="w-4 h-4 text-amber flex-shrink-0 mt-0.5" />
+          <div>
+            <p className="text-xs text-amber font-medium">Partial Evidence Collection</p>
+            <p className="text-xs text-text-secondary mt-0.5">
+              {rawData.evidence.evidence_collection_reason || 'Lambda function name could not be resolved. Logs and Metrics are unavailable. Use Raw Json tab to inspect full evidence.'}
+            </p>
+          </div>
+        </div>
+      )}
       
       {/* Tab Navigation */}
       <div className="flex space-x-1 mb-4 bg-bg-elevated rounded p-1 flex-wrap gap-1">

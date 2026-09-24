@@ -58,7 +58,13 @@ def lambda_handler(event, context):
         return {"statusCode": 400, "body": json.dumps({"error": "Missing incident_id"})}
 
     # 1. Fetch full IncidentRecord from DynamoDB
-    record = _get_incident_record(incident_id)
+    # SE-13: _get_incident_record now raises RuntimeError on DynamoDB error so we
+    # can distinguish a genuine missing record (404) from a transient AWS failure (500).
+    try:
+        record = _get_incident_record(incident_id)
+    except RuntimeError as exc:
+        logger.error(json.dumps({"event": "ddb_fetch_error", "incident_id": incident_id, "error": str(exc)}))
+        return {"statusCode": 500, "body": json.dumps({"error": f"Failed to fetch incident record: {exc}"})}
     if not record:
         logger.error(json.dumps({"event": "record_not_found", "incident_id": incident_id}))
         return {"statusCode": 404, "body": json.dumps({"error": f"Incident '{incident_id}' not found."})}
@@ -134,6 +140,14 @@ def lambda_handler(event, context):
 # ===========================================================================
 
 def _get_incident_record(incident_id: str) -> dict | None:
+    """
+    Fetch the IncidentRecord from DynamoDB.
+
+    SE-13: Raises RuntimeError on DynamoDB failure so the caller cannot silently
+    proceed as if the record was not found. A transient DynamoDB error should NOT
+    look identical to a genuinely missing incident record - both returned None before
+    this fix, leaving the approved incident permanently stuck.
+    """
     try:
         resp = _dynamodb.Table(INCIDENTS_TABLE).get_item(Key={"incident_id": incident_id})
         return resp.get("Item")
@@ -142,8 +156,9 @@ def _get_incident_record(incident_id: str) -> dict | None:
             "event": "dynamodb_get_error",
             "incident_id": incident_id,
             "error": str(exc),
+            "ATTENTION": "Raising so the Lambda returns a 500, not a silent 404 that looks like a missing record",
         }))
-        return None
+        raise RuntimeError(f"DynamoDB GetItem failed for incident {incident_id!r}: {exc}") from exc
 
 
 def _update_remediation_record(
@@ -176,7 +191,7 @@ def _update_remediation_record(
             "new_status": new_status,
             "action_taken": action_taken,
         }))
-    except ClientError as exc:
+    except Exception as exc:  # noqa: BLE001 - SE-11: catch all, not just ClientError
         # Log but do not raise - the action has already executed.
         # Losing the DynamoDB write here means we lose evaluation data,
         # which is worse than an unclean status, so log loudly.
@@ -184,7 +199,8 @@ def _update_remediation_record(
             "event": "dynamodb_update_error",
             "incident_id": incident_id,
             "error": str(exc),
-            "ATTENTION": "DynamoDB write failed after action executed - incident record may be stale",
+            "error_type": type(exc).__name__,
+            "ATTENTION": "DynamoDB write failed after action executed - incident record may be stale and verification will not run",
         }))
 
 
@@ -195,11 +211,15 @@ def _update_remediation_record(
 def _build_original_signal(record: dict) -> dict:
     """
     Build the signal description dict for the verification Lambda.
-    Alarm thresholds are hardcoded here to match the alarm definitions in
-    template.yaml - this avoids a DescribeAlarms call and keeps the
-    remediation Lambda's IAM role tightly scoped.
 
-    If template.yaml alarm thresholds change, this function must be updated.
+    SE-12: Alarm thresholds are read from environment variables so they can be updated
+    without a code change when template.yaml alarm definitions change. The env var names
+    are documented here. If not set, the defaults match the current template.yaml values.
+
+    Env vars (all optional, integers):
+      RESOURCE_EXHAUSTION_DURATION_THRESHOLD_MS  default: 50000
+      SERVICE_CASCADE_ERROR_THRESHOLD             default: 5
+      SERVICE_CASCADE_LATENCY_THRESHOLD_MS        default: 3000
     """
     fault_class = record.get("fault_class", "unknown")
     resource_id = (record.get("resource_id") or "").strip()
@@ -215,8 +235,10 @@ def _build_original_signal(record: dict) -> dict:
         # resource_id for cloudwatch-triggered incidents is the alarm name
         signal["alarm_name"] = resource_id
         signal["metric_name"] = "Duration"
-        # Threshold from template.yaml ServiceAResourceExhaustionAlarm (ms)
-        signal["threshold"] = 50000
+        # SE-12: read from env so it stays in sync with template.yaml without code changes
+        signal["threshold"] = int(
+            os.environ.get("RESOURCE_EXHAUSTION_DURATION_THRESHOLD_MS", "50000")
+        )
 
     elif fault_class == "misconfiguration":
         # The collector stores the parsed event; try to extract config_rule from it.
@@ -230,9 +252,13 @@ def _build_original_signal(record: dict) -> dict:
 
     elif fault_class == "service_cascade":
         signal["alarm_name"] = resource_id
-        # Thresholds from template.yaml (must stay in sync)
-        signal["service_a_error_threshold"] = 5       # ServiceAErrorAlarm: Errors >= 5 over 2 periods
-        signal["service_c_latency_threshold"] = 3000  # ServiceCHighLatencyAlarm: Duration avg > 3000ms
+        # SE-12: read from env so thresholds stay in sync with template.yaml
+        signal["service_a_error_threshold"] = int(
+            os.environ.get("SERVICE_CASCADE_ERROR_THRESHOLD", "5")
+        )
+        signal["service_c_latency_threshold"] = int(
+            os.environ.get("SERVICE_CASCADE_LATENCY_THRESHOLD_MS", "3000")
+        )
 
     return signal
 

@@ -453,10 +453,24 @@ def trigger_diagnosis(incident_id):
         if not item:
             return _json_resp(error=f"Incident {incident_id!r} not found", status=404)
 
+        s3_key = item.get("raw_data_s3_key", "")
+
+        # SE-10: If the S3 key is missing the diagnosis Lambda will construct a default
+        # path and likely get a NoSuchKey error (which now raises RuntimeError), so the
+        # diagnosis will correctly return an evidence_fetch_failed status instead of
+        # silently producing a heuristic diagnosis from an empty evidence bundle.
+        # We still warn here so the operator sees the issue in the local server log.
+        if not s3_key:
+            logger.warning(
+                "[Diagnose] incident %s has no raw_data_s3_key - "
+                "diagnosis will attempt default S3 path and likely fail with evidence_fetch_failed",
+                incident_id,
+            )
+
         event = {
             "incident_id": incident_id,
             "fault_class": item.get("fault_class", "unknown"),
-            "raw_data_s3_key": item.get("raw_data_s3_key", ""),
+            "raw_data_s3_key": s3_key,
         }
         logger.info("[Diagnose] manually triggering diagnosis for %s", incident_id)
         result = diagnosis_handler.lambda_handler(event, {})
@@ -683,10 +697,18 @@ def demo_diagnose(incident_id):
         item = resp.get("Item")
         if not item:
             return jsonify({"data": None, "error": f"Incident {incident_id!r} not found"}), 404
+        s3_key = item.get("raw_data_s3_key", "")
+        # SE-10: warn if missing so operator can see it in the log
+        if not s3_key:
+            logger.warning(
+                "[DemoDiagnose] incident %s has no raw_data_s3_key - "
+                "diagnosis will attempt default S3 path and likely fail with evidence_fetch_failed",
+                incident_id,
+            )
         event = {
             "incident_id": incident_id,
             "fault_class": item.get("fault_class", "unknown"),
-            "raw_data_s3_key": item.get("raw_data_s3_key", ""),
+            "raw_data_s3_key": s3_key,
         }
         return invoke_handler(diagnosis_handler, event)
     except Exception as exc:
@@ -702,7 +724,35 @@ def demo_health():
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
+
+# SE-15: Startup validation - fail loudly if any critical handler did not load.
+# Without this, the server starts silently and all requests to that stage return
+# a 500 error that is easy to miss, especially during active development.
+_CRITICAL_HANDLERS = {
+    "collector": collector_handler,
+    "diagnosis": diagnosis_handler,
+    "remediation": remediation_handler,
+    "verification": verification_handler,
+}
+_MISSING_CRITICAL = [name for name, mod in _CRITICAL_HANDLERS.items() if mod is None]
+
 if __name__ == "__main__":
+    if _MISSING_CRITICAL:
+        print()
+        print("=" * 62)
+        print("  STARTUP ERROR: Critical handlers failed to load")
+        for name in _MISSING_CRITICAL:
+            print(f"  MISSING: {name}")
+        print()
+        print("  These pipeline stages will return 500 for all requests.")
+        print("  Fix the import errors above before proceeding.")
+        print("=" * 62)
+        print()
+        # Non-critical handlers (notify, approval, demo) are warnings only.
+        # Critical handler failure means the pipeline cannot run at all.
+        import sys
+        sys.exit(1)
+
     print("\n" + "=" * 62)
     print("  Local Backend - Full Pipeline Mode")
     print("  Main API  -> http://localhost:3001")
@@ -714,6 +764,10 @@ if __name__ == "__main__":
     print("  Pipeline handlers registered:")
     for name in LocalLambdaRouter._registry:
         print(f"    {name}")
+    if notify_handler is None:
+        print("  [WARN] notify_handler not loaded - Slack notifications disabled")
+    if approval_handler_mod is None:
+        print("  [WARN] approval_handler not loaded - using direct DynamoDB approve route")
     print("=" * 62 + "\n")
 
     demo_thread = threading.Thread(

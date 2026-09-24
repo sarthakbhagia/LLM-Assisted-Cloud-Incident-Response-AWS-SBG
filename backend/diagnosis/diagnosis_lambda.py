@@ -94,8 +94,32 @@ def lambda_handler(event, context):
         logger.error("Missing incident_id or DATA_LAKE_BUCKET")
         return {"statusCode": 400, "body": "Missing required parameters"}
 
-    # 1. Fetch raw evidence from S3
-    raw_data = _fetch_s3_raw_data(s3_key)
+    # 1. Fetch raw evidence from S3 - raises RuntimeError if S3 is unreachable or key
+    #    is missing, so we cannot silently diagnose from an empty evidence blob (SE-1).
+    try:
+        raw_data = _fetch_s3_raw_data(s3_key)
+    except RuntimeError as exc:
+        # Write an explicit error status to DynamoDB so the operator can see this
+        # incident was never diagnosed due to evidence fetch failure.
+        _update_dynamodb_diagnosis(
+            incident_id,
+            {
+                "root_cause": "Evidence fetch failed - cannot diagnose",
+                "confidence": 0.0,
+                "affected_resources": [],
+                "suggested_action": "manual_review_required",
+                "explanation": str(exc),
+                "reasoning_trace": "Diagnosis aborted: S3 evidence bundle could not be read.",
+                "diagnosis_status": "evidence_fetch_failed",
+                "is_heuristic": True,
+            },
+            used_rag,
+            f"evidence_fetch_failed: {exc}",
+        )
+        return {
+            "statusCode": 500,
+            "body": json.dumps({"error": str(exc), "incident_id": incident_id}),
+        }
 
     # 2. Load runbook context (if RAG enabled)
     runbook_text = None
@@ -116,7 +140,7 @@ def lambda_handler(event, context):
     # 5. Update DynamoDB IncidentRecord
     _update_dynamodb_diagnosis(incident_id, diagnosis_output, used_rag, failure_mode)
 
-    # 6. Invoke Notify Lambda
+    # 6. Invoke Notify Lambda - writes notify_failed flag to DynamoDB on failure (SE-14)
     _invoke_notify(incident_id, diagnosis_output)
 
     return {
@@ -131,13 +155,23 @@ def lambda_handler(event, context):
 
 
 def _fetch_s3_raw_data(s3_key: str) -> dict:
+    """
+    Fetch raw evidence JSON from S3. Raises RuntimeError on any failure so the
+    caller cannot silently continue on an empty evidence dict and produce a
+    high-confidence heuristic diagnosis from zero data (SE-1).
+    """
     try:
         resp = _s3.get_object(Bucket=DATA_LAKE_BUCKET, Key=s3_key)
         content = resp["Body"].read().decode("utf-8")
         return json.loads(content)
     except Exception as exc:  # noqa: BLE001
-        logger.error(f"Error reading S3 raw_data key={s3_key}: {exc}")
-        return {"fault_class": "unknown", "evidence": {}, "error": str(exc)}
+        logger.error(json.dumps({
+            "event": "s3_evidence_fetch_failed",
+            "s3_key": s3_key,
+            "error": str(exc),
+            "ATTENTION": "Cannot run diagnosis without evidence - raising so the incident record gets an explicit error status",
+        }))
+        raise RuntimeError(f"Evidence fetch failed for key={s3_key!r}: {exc}") from exc
 
 
 def _invoke_llm_with_validation(
@@ -354,6 +388,10 @@ def _call_bedrock(prompt: str) -> tuple[str, str | None, bool]:
     logger.info("All inner functions defined successfully")
     logger.info("Starting model fallback chain")
     logger.info("About to try Nova Pro")
+    # SE-7: Each leg catches Exception (not just ClientError) so non-boto errors
+    # (e.g. KeyError parsing the response body) also fall through to the next model.
+    # SE-4: Llama uses "stop" as its normal completion signal (not truncation).
+    #       Only "max_tokens" and "length" mean the output was cut short for Llama.
     try:
         logger.info("Attempt 1: Nova Pro")
         result, stop_reason = _try_model(BEDROCK_MODEL_ID, _invoke_nova, "Nova Pro", FALLBACK_MODEL_ID)
@@ -362,21 +400,20 @@ def _call_bedrock(prompt: str) -> tuple[str, str | None, bool]:
         if is_truncated:
             logger.warning(f"Nova Pro output truncated (stop_reason={stop_reason})")
         return result, stop_reason, is_truncated
-    except ClientError as e:
-        logger.warning(f"Nova Pro failed with ClientError: {e}")
-        pass
+    except Exception as e:  # SE-7: catch all, not just ClientError
+        logger.warning(f"Nova Pro failed ({type(e).__name__}): {e}")
 
     try:
         logger.info("Attempt 2: Llama 3 70B")
         result, stop_reason = _try_model(FALLBACK_MODEL_ID, _invoke_llama, "Llama 3 70B", SECOND_FALLBACK_MODEL_ID)
         logger.info(f"Llama attempt returned: {result[:100] if result else 'None'}, stop_reason: {stop_reason}")
-        is_truncated = stop_reason in ("max_tokens", "length", "stop")
+        # SE-4: "stop" is Llama's normal EOS token - not a truncation signal.
+        is_truncated = stop_reason in ("max_tokens", "length")
         if is_truncated:
             logger.warning(f"Llama output truncated (stop_reason={stop_reason})")
         return result, stop_reason, is_truncated
-    except ClientError as e:
-        logger.warning(f"Llama failed with ClientError: {e}")
-        pass
+    except Exception as e:  # SE-7
+        logger.warning(f"Llama failed ({type(e).__name__}): {e}")
 
     try:
         logger.info("Attempt 3: Mistral Large")
@@ -386,9 +423,8 @@ def _call_bedrock(prompt: str) -> tuple[str, str | None, bool]:
         if is_truncated:
             logger.warning(f"Mistral output truncated (stop_reason={stop_reason})")
         return result, stop_reason, is_truncated
-    except ClientError as e:
-        logger.warning(f"Mistral failed with ClientError: {e}")
-        pass
+    except Exception as e:  # SE-7
+        logger.warning(f"Mistral failed ({type(e).__name__}): {e}")
 
     try:
         logger.info("Attempt 4: Nova Micro")
@@ -496,18 +532,30 @@ def _parse_and_validate_json(raw_text: str) -> dict:
 
 
 def _generate_fallback_diagnosis(fault_class: str, raw_data: dict) -> dict:
-    """Generate heuristic fallback diagnosis when Bedrock is unavailable/unconfigured."""
+    """
+    Generate heuristic fallback diagnosis when Bedrock is unavailable or all models
+    failed / produced un-parseable output.
+
+    SE-2: Confidence is set to 0.30 (low) instead of 0.85-0.90. A heuristic that has
+    not seen any evidence should never show a high-confidence bar in the UI. The
+    is_heuristic flag is set to True so the UI can display a clear banner.
+    """
     evidence = raw_data.get("evidence", {})
     resource_id = raw_data.get("detection_event", {}).get("resource_id", "unknown-resource")
+
+    # SE-2: Low confidence for all heuristic paths - these are pattern-matched guesses,
+    # not evidence-based conclusions.
+    HEURISTIC_CONFIDENCE = 0.30
 
     if fault_class == "resource_exhaustion":
         return {
             "root_cause": "Lambda execution duration exceeded threshold under memory/compute exhaustion pressure",
-            "confidence": 0.85,
+            "confidence": HEURISTIC_CONFIDENCE,
             "affected_resources": [evidence.get("function_name") or resource_id],
             "suggested_action": "scale_up",
-            "explanation": "Service A experienced high duration causing timeout alarms.",
-            "reasoning_trace": "Fallback diagnosis based on resource_exhaustion telemetry metrics.",
+            "explanation": "Service A experienced high duration causing timeout alarms. (Heuristic - LLM unavailable)",
+            "reasoning_trace": "Heuristic fallback: LLM diagnosis unavailable. Pattern matched from fault_class=resource_exhaustion.",
+            "is_heuristic": True,
         }
 
     if fault_class == "misconfiguration":
@@ -521,30 +569,33 @@ def _generate_fallback_diagnosis(fault_class: str, raw_data: dict) -> dict:
 
         return {
             "root_cause": f"AWS Security non-compliance flagged by rule {config_rule or resource_id}",
-            "confidence": 0.90,
+            "confidence": HEURISTIC_CONFIDENCE,
             "affected_resources": [resource_id],
             "suggested_action": action,
-            "explanation": f"Security non-compliance detected on {resource_id}.",
-            "reasoning_trace": "Fallback diagnosis based on AWS Config / GuardDuty compliance record.",
+            "explanation": f"Security non-compliance detected on {resource_id}. (Heuristic - LLM unavailable)",
+            "reasoning_trace": "Heuristic fallback: LLM diagnosis unavailable. Pattern matched from fault_class=misconfiguration.",
+            "is_heuristic": True,
         }
 
     if fault_class == "service_cascade":
         return {
             "root_cause": "Downstream Service C failure cascaded upstream to Service B and Service A",
-            "confidence": 0.88,
+            "confidence": HEURISTIC_CONFIDENCE,
             "affected_resources": ["ServiceC", "ServiceB", "ServiceA"],
             "suggested_action": "restart_downstream_service",
-            "explanation": "Cascading failure initiated at leaf service Service C.",
-            "reasoning_trace": "Fallback diagnosis based on X-Ray service graph & log correlation.",
+            "explanation": "Cascading failure initiated at leaf service Service C. (Heuristic - LLM unavailable)",
+            "reasoning_trace": "Heuristic fallback: LLM diagnosis unavailable. Pattern matched from fault_class=service_cascade.",
+            "is_heuristic": True,
         }
 
     return {
         "root_cause": "Unspecified incident anomaly detected",
-        "confidence": 0.50,
+        "confidence": HEURISTIC_CONFIDENCE,
         "affected_resources": [resource_id],
         "suggested_action": "manual_review_required",
-        "explanation": "Incident requires manual investigation.",
-        "reasoning_trace": "Fallback generic diagnosis.",
+        "explanation": "Incident requires manual investigation. (Heuristic - LLM unavailable)",
+        "reasoning_trace": "Heuristic fallback: unknown fault_class, cannot pattern-match.",
+        "is_heuristic": True,
     }
 
 
@@ -607,6 +658,11 @@ def _update_dynamodb_diagnosis(
 
 
 def _invoke_notify(incident_id: str, diagnosis_output: dict) -> None:
+    """
+    Invoke the notify Lambda. On any failure, write a notify_failed flag to DynamoDB
+    so operators can see that no Slack notification was sent (SE-14). We do NOT raise
+    here - notification failure must never block the diagnosis record from being saved.
+    """
     if not NOTIFY_FUNCTION_NAME:
         logger.warning("NOTIFY_FUNCTION_NAME not configured; skipping notify step")
         return
@@ -622,5 +678,23 @@ def _invoke_notify(incident_id: str, diagnosis_output: dict) -> None:
             Payload=json.dumps(payload),
         )
         logger.info(f"Invoked Notify Lambda {NOTIFY_FUNCTION_NAME} for incident {incident_id}")
-    except ClientError as exc:
-        logger.error(f"Error invoking Notify Lambda {NOTIFY_FUNCTION_NAME}: {exc}")
+    except Exception as exc:  # noqa: BLE001 - SE-14: catch all, not just ClientError
+        logger.error(json.dumps({
+            "event": "notify_invoke_failed",
+            "incident_id": incident_id,
+            "error": str(exc),
+            "ATTENTION": "Slack notification was NOT sent. Writing notify_failed flag to DynamoDB.",
+        }))
+        # SE-14: Write the failure flag so the UI and evaluation scripts can detect it.
+        if INCIDENTS_TABLE:
+            try:
+                _dynamodb.Table(INCIDENTS_TABLE).update_item(
+                    Key={"incident_id": incident_id},
+                    UpdateExpression="SET diagnosis.notify_failed = :v, diagnosis.notify_error = :e",
+                    ExpressionAttributeValues={
+                        ":v": True,
+                        ":e": str(exc),
+                    },
+                )
+            except Exception as ddb_exc:  # noqa: BLE001
+                logger.error(f"Could not write notify_failed flag to DynamoDB: {ddb_exc}")
