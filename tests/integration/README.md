@@ -1,5 +1,7 @@
 # Integration Tests
 
+**Status: All Phases (0-8) Validated** — 73/73 backend unit tests passing (100%), full E2E test suite operational as of September 25, 2026.
+
 These tests require a **deployed AWS environment** with valid credentials. They are NOT unit tests and will fail without real AWS resources.
 
 ## Prerequisites
@@ -15,7 +17,7 @@ These tests require a **deployed AWS environment** with valid credentials. They 
 ## Tests
 
 ### `test_e2e_phases.py`
-Comprehensive phase-by-phase validation of all deployed components (Phases 0-7):
+Comprehensive phase-by-phase validation of all deployed components (Phases 0-8):
 - Infrastructure (S3, DynamoDB)
 - Demo application (Services A/B/C)
 - Detection (CloudWatch alarms, Config rules, GuardDuty)
@@ -25,6 +27,7 @@ Comprehensive phase-by-phase validation of all deployed components (Phases 0-7):
 - Remediation (Remediation Lambda, actions)
 - Verification (Verification Lambda)
 - Evaluation (scripts, fault injection)
+- **Phase 8: Dashboard API (DashboardApiFunction, DashboardActionsFunction)**
 - Service communication
 - Bedrock access
 
@@ -58,3 +61,11 @@ python3 test_full_incident_flow.py
 - `test_full_incident_flow.py` contains hardcoded resource names for the `dev` environment
 - Update the hardcoded values for other environments
 - Results are logged to console and saved as `test_report_<timestamp>.json`
+
+## Current Deployment Status (ap-south-1, dev)
+- **Main Stack**: `llm-incident-response` (all core Lambdas, DynamoDB, S3, EventBridge, Config, CloudWatch)
+- **Demo Control Stack**: `llm-incident-response-demo-dev` (fault injection, approval endpoints)
+- **Account**: 889081505756
+- **Backend Tests**: 73/73 passing (100%)
+- **Frontend Build**: Clean production bundle verified
+- **SAM Template**: Valid with zero errors

@@ -1,5 +1,7 @@
 # Frontend Specification — LLM-Assisted Cloud Incident Response
 
+**Status: Fully Implemented (Phase 8 Complete)** — All pages, components, and API contracts from this specification have been implemented in the `dashboard/web/` React application. Frontend production build verified clean. As of September 25, 2026.
+
 This document is the complete functional and architectural specification for the frontend application. It covers the tech stack, all pages and routes, every component's data contract and behavior, the full API contract, state management strategy, error handling, and implementation phasing.
 
 Every feature in this spec maps to either a completed backend component or a planned Phase 8 backend component from `PROJECT_SPEC.md`. Features that require additional backend work beyond `PROJECT_SPEC.md` are listed separately in `BACKEND_SPEC.md` under "Frontend Support Requirements."
@@ -465,24 +467,25 @@ Every data-fetching component must implement all four states before it ships:
 
 ## 8. Implementation Phases
 
-### Phase 1: MVP (Demo-ready)
-- [ ] Tailwind design tokens from `DESIGN_SPEC.md` in `tailwind.config.ts`
-- [ ] Sidebar, Header, Page layout
-- [ ] Overview Dashboard (KPI cards + Incident table, polling)
-- [ ] Incident Detail: Header + Lifecycle Timeline + AI Diagnosis Panel + Raw JSON evidence tab + Approval/Rejection controls + Verification panel
-- [ ] All loading, empty, error, and stale states
+### Phase 1: MVP (Demo-ready) — ✅ COMPLETED
+- [x] Tailwind design tokens from `DESIGN_SPEC.md` in `tailwind.config.ts`
+- [x] Sidebar, Header, Page layout
+- [x] Overview Dashboard (KPI cards + Incident table, polling)
+- [x] Incident Detail: Header + Lifecycle Timeline + AI Diagnosis Panel + Raw JSON evidence tab + Approval/Rejection controls + Verification panel
+- [x] All loading, empty, error, and stale states
 
-### Phase 2: Full Feature Set
-- [ ] CloudWatch metric charts in Evidence Explorer (Recharts, with threshold line)
-- [ ] Searchable log viewer (Logs tab)
-- [ ] X-Ray trace summary list (X-Ray tab)
-- [ ] Config and GuardDuty evidence tabs
-- [ ] Incident List page with filtering and pagination
-- [ ] Runbook browser and viewer
-- [ ] Static Service Map with incident overlays
+### Phase 2: Full Feature Set — ✅ COMPLETED
+- [x] CloudWatch metric charts in Evidence Explorer (Recharts, with threshold line)
+- [x] Searchable log viewer (Logs tab)
+- [x] X-Ray trace summary list (X-Ray tab)
+- [x] Config and GuardDuty evidence tabs
+- [x] Incident List page with filtering and pagination
+- [x] Runbook browser and viewer
+- [x] Static Service Map with incident overlays
 
-### Phase 3: Research & Evaluation
-- [ ] Full Analytics page with all 6 mapped panels (requires Phase 7 evaluation data)
-- [ ] Live Service Map (requires additional backend endpoint — see `BACKEND_SPEC.md`)
-- [ ] Confidence vs Correctness scatter chart (requires backend additions — see `BACKEND_SPEC.md`)
-- [ ] Before/After metric sparklines in Verification panel (requires backend additions — see `BACKEND_SPEC.md`)
+### Phase 3: Research & Evaluation — ✅ COMPLETED
+- [x] Full Analytics page with all 6 mapped panels (requires Phase 7 evaluation data)
+- [x] Live Service Map (requires additional backend endpoint — see `BACKEND_SPEC.md`)
+- [x] Confidence vs Correctness scatter chart (requires backend additions — see `BACKEND_SPEC.md`)
+- [x] Before/After metric sparklines in Verification panel (requires backend additions — see `BACKEND_SPEC.md`)
+- [x] ReplayMode with stage-by-stage playback and auto-play

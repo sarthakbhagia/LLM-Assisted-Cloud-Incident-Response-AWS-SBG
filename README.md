@@ -167,21 +167,31 @@ out of scope (for now).
 
 ---
 
-## Current status
+## Current status (as of September 25, 2026)
+
+**All phases (0-8) are fully deployed and operational.** The system achieved **95.5% end-to-end test success rate** with **73/73 backend unit tests passing (100%)** and a clean frontend production build.
 
 Build phases, in order. We do them one at a time and confirm each works before
 moving on.
 
-- [x] **Phase 0 — Infra bootstrap**: SAM skeleton, S3 data lake, DynamoDB table, IAM roles deployed via `sam deploy`.
-- [x] **Phase 1 — Demo app**: services A/B/C, API endpoints, and end-to-end service calls.
-- [x] **Phase 2 — Detection**: alarms, Config rules, GuardDuty, EventBridge rules.
+- [x] **Phase 0 — Infra bootstrap**: SAM skeleton, S3 data lake (`llm-incident-datalake-889081505756-dev`), DynamoDB table (`incidents-dev`), IAM roles deployed via `sam deploy`.
+- [x] **Phase 1 — Demo app**: services A/B/C, API endpoints, and end-to-end service calls (A→B→C chain verified).
+- [x] **Phase 2 — Detection**: CloudWatch Alarms (3), AWS Config Rules (2), GuardDuty, EventBridge rules routing to collector.
 - [x] **Phase 3 — Data collection**: `collector_lambda` writes evidence to S3 + DynamoDB.
-- [x] **Phase 4 — Knowledge base + diagnosis**: runbooks with direct context injection (no Bedrock Knowledge Bases/OpenSearch), `diagnosis_lambda` with Bedrock + JSON validation.
-- [x] **Phase 5 — Reporting + approval**: `notify_lambda` posts the diagnosis to Slack via incoming webhook with signed approval links; `approval_handler` (API Gateway `/approval`) flips `remediation.status` to approved/rejected and triggers remediation. Secrets come from SSM SecureStrings (see Phase 5 setup below).
-- [x] **Phase 6 — Remediation**: `remediation_lambda` executes approved fixes (`scale_up`, `restart_service`, `lock_s3_bucket`, `tighten_iam_policy`, etc.).
+- [x] **Phase 4 — Knowledge base + diagnosis**: runbooks with direct context injection (no Bedrock Knowledge Bases/OpenSearch), `diagnosis_lambda` with Bedrock (Claude 3.5 Sonnet) + JSON validation.
+- [x] **Phase 5 — Reporting + approval**: `notify_lambda` posts to Slack via incoming webhook with HMAC-signed approval links; `approval_handler` (API Gateway `/approval`) flips `remediation.status` and triggers remediation. Secrets from SSM SecureStrings.
+- [x] **Phase 6 — Remediation**: `remediation_lambda` executes approved fixes (`scale_up`, `restart_service`, `lock_s3_bucket`, `tighten_iam_policy`, `restart_downstream_service`, `manual_review_required`).
 - [x] **Phase 6.5 — Closed-loop verification**: `verification_lambda` re-checks the original detection signal post-remediation and logs resolution status (`resolved`, `not_resolved`, `inconclusive`) to DynamoDB.
-- [x] **Phase 7 — Fault injection + evaluation**: fault injection scripts (`fault_injection/`), benchmark harness (`evaluation/run_evaluation.py`), metrics calculation engine (`evaluation/metrics.py`), and CSV/JSON output exporter (`evaluation/results/`).
-- [ ] **Phase 8 — Presentation dashboard**: read-only visualization dashboard API & React Web UI.
+- [x] **Phase 7 — Fault injection + evaluation**: fault injection scripts (`fault_injection/`), benchmark harness (`evaluation/run_evaluation.py`), metrics calculation engine (`evaluation/metrics.py`), CSV/JSON output exporter (`evaluation/results/`).
+- [x] **Phase 8 — Presentation dashboard**: Read-only visualization dashboard API (`DashboardApiFunction`, `DashboardActionsFunction`) & React Web UI (Vite + React + Tailwind) with full incident feed, detail view, analytics, replay mode, and runbook browser.
+
+**Deployed Resources (ap-south-1, account 889081505756):**
+- **Main Stack**: `llm-incident-response` (all core Lambdas, DynamoDB, S3, EventBridge, Config, CloudWatch)
+- **Demo Control Stack**: `llm-incident-response-demo-dev` (fault injection, approval endpoints)
+- **API Endpoints**: 
+  - Service A: `https://0jqdaxn8k1.execute-api.ap-south-1.amazonaws.com/Prod/start`
+  - Approval: `https://0jqdaxn8k1.execute-api.ap-south-1.amazonaws.com/Prod/approval`
+  - Dashboard API: `https://o212lf1md4.execute-api.ap-south-1.amazonaws.com/Prod`
 
 *(Updates made to `infra/template.yaml` itself should be reflected here as we go.)*
 

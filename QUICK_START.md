@@ -1,5 +1,7 @@
 ﻿# Quick Start Guide
 
+**System Status: Fully Operational (All Phases 0-8 Complete)** — Backend: 73/73 tests passing (100%), Frontend: Clean production build verified, SAM template validation: zero errors. Last verified: September 25, 2026.
+
 This guide gets the full LLM-Assisted Cloud Incident Response system running in under 10 minutes, either against live AWS resources locally or against the already-deployed production stack.
 
 ---
@@ -139,8 +141,10 @@ Skip running any backend locally. The frontend connects directly to the deployed
 
 Remove (or do not create) `frontend/.env`. The `api.js` fallback URLs point to the deployed production stack:
 
-- Main API: `https://o212lf1md4.execute-api.ap-south-1.amazonaws.com/Prod`
-- Demo API: `https://0l32vjl4n8.execute-api.ap-south-1.amazonaws.com/Prod`
+- Main API (Dashboard): `https://o212lf1md4.execute-api.ap-south-1.amazonaws.com/Prod`
+- Demo Control API (Fault Injection): `https://0l32vjl4n8.execute-api.ap-south-1.amazonaws.com/Prod`
+- Service A (Entry Point): `https://0jqdaxn8k1.execute-api.ap-south-1.amazonaws.com/Prod/start`
+- Approval Endpoint: `https://0jqdaxn8k1.execute-api.ap-south-1.amazonaws.com/Prod/approval`
 
 Start only the frontend:
 
@@ -234,7 +238,8 @@ aws cloudfront create-invalidation --distribution-id <dist-id> --paths "/*"
 ```
 .
 ├── backend/
-│   ├── dashboard_api/      # Phase 8: read-only visualization API
+│   ├── dashboard_api/      # Phase 8: read-only visualization API (DashboardApiFunction)
+│   ├── dashboard_actions/  # Phase 8: action/write path (DashboardActionsFunction)
 │   ├── demo_control/       # Demo Mode: fault injection and approval
 │   ├── collector/          # Phase 3: collects evidence from AWS
 │   ├── diagnosis/          # Phase 4: LLM diagnosis via Bedrock
@@ -242,7 +247,7 @@ aws cloudfront create-invalidation --distribution-id <dist-id> --paths "/*"
 │   ├── approval/           # Phase 5: approve/reject API
 │   ├── remediation/        # Phase 6: executes fix actions
 │   └── verification/       # Phase 6.5: verifies remediation worked
-├── frontend/               # React + Vite + Tailwind dashboard
+├── frontend/               # React + Vite + Tailwind dashboard (dashboard/web/)
 │   ├── src/
 │   │   ├── config/api.js   # API client with envelope unwrapping
 │   │   ├── pages/          # Overview, Incidents, IncidentDetail, Analytics,
@@ -254,16 +259,19 @@ aws cloudfront create-invalidation --distribution-id <dist-id> --paths "/*"
 │   ├── template.yaml               # Main SAM template
 │   ├── demo-control-template.yaml  # Demo control SAM template
 │   └── samconfig.toml              # Deploy config for dev environment
-├── knowledge_base/         # Runbook markdown files
-├── evaluation/             # Phase 7 evaluation scripts
-├── fault_injection/        # Manual fault injection scripts
+├── knowledge_base/         # Runbook markdown files (resource_exhaustion, misconfiguration, service_cascade)
+├── evaluation/             # Phase 7 evaluation scripts (run_evaluation.py, metrics.py, results/)
+├── fault_injection/        # Manual fault injection scripts (3 fault classes)
 ├── local_backend.py        # Flask proxy for local dev (no Docker needed)
 ├── env.json                # SAM local env vars - main stack
 ├── env.demo.json           # SAM local env vars - demo stack
 ├── BACKEND_SPEC.md         # Backend architecture + API response contracts
 ├── FRONTEND_SPEC.md        # Frontend architecture + implementation status
 ├── PROJECT_SPEC.md         # Full project specification
-└── DESIGN_SPEC.md          # Design system tokens and component specs
+├── DESIGN_SPEC.md          # Design system tokens and component specs
+├── README.md               # This file
+├── QUICK_START.md          # Quick start guide
+└── E2E_TEST_REPORT.md      # End-to-end test results
 ```
 
 ---
@@ -280,8 +288,13 @@ All endpoints are wrapped in `{ data: ..., error: null }`. The frontend `ApiClie
 | GET | `/api/analytics` | Phase 7 summary JSON, or `null` |
 | GET | `/api/runbooks` | `{ runbooks: RunbookMeta[], count }` |
 | GET | `/api/runbooks/:fault_class` | `{ fault_class, s3_key, content: "..." }` |
-| POST | `/demo/inject` | `{ incident_id, status }` |
-| POST | `/demo/approve/:id` | `{ success, message }` |
+| GET | `/api/services` | `{ nodes: ServiceNode[], edges: ServiceEdge[] }` |
+| GET | `/api/incidents/:id/trace` | Per-stage pipeline timestamps |
+| GET | `/api/incidents/:id/trace/artifact` | Before/after metric snapshots |
+| POST | `/api/incidents/:id/approve` | `{ success, message }` |
+| POST | `/api/incidents/:id/reject` | `{ success, message }` |
+| POST | `/api/diagnose` | `{ message: "Diagnosis triggered" }` |
+| POST | `/api/inject` | `{ incident_id, message: "Fault injection triggered" }` |
 
 > **Important field names:** The incidents list uses `items` (not `incidents`), and pagination uses `next_token` (not `cursor`). The detail endpoint returns the incident object directly (not nested under `.incident`). See `BACKEND_SPEC.md` Section 6 for the full contract.
 

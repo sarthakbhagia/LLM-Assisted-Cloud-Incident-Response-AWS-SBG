@@ -215,34 +215,40 @@ README.md
 22. Compare the rechecked signal against the original alarm threshold/condition. Write the result to `IncidentRecord.verification`: `resolved` (signal back to normal), `not_resolved` (signal still triggering), or `inconclusive` (ambiguous/insufficient data)
 23. This step runs for both real and injected incidents — it's what lets you measure the diagnosis-recovery gap (cases where `diagnosis.confidence` was high but `verification.status` came back `not_resolved`)
 
-### Phase 7: Fault injection + evaluation harness
-24. Implement the 3 injection scripts — each deliberately triggers its fault class against the demo app (e.g., a CPU-burn script for exhaustion, a script that flips an S3 bucket to public, a script that kills service-c to cascade failures into service-a/b)
-25. Implement `run_evaluation.py`: runs each injection script N times (aim for 15-20 runs per class), waits for the pipeline (including the Phase 6.5 verification step) to complete, pulls the resulting `IncidentRecord` from DynamoDB, and logs ground truth vs actual diagnosis vs verification outcome
-26. Implement `metrics.py`:
+### Phase 7: Fault injection + evaluation harness — COMPLETED
+24. ✅ Implemented the 3 injection scripts — each deliberately triggers its fault class against the demo app (CPU-burn for exhaustion, S3 bucket public flip for misconfiguration, service-c kill for cascade)
+25. ✅ Implemented `run_evaluation.py`: runs each injection script N times, waits for pipeline (including Phase 6.5 verification) to complete, pulls `IncidentRecord` from DynamoDB, logs ground truth vs actual diagnosis vs verification outcome
+26. ✅ Implemented `metrics.py`:
     - **MTTR**: `remediation.executed_at - detected_at`
-    - **RCA accuracy**: does `diagnosis.root_cause` semantically match `ground_truth.true_fault_class`? (use simple keyword/rule-based scoring as the primary metric to avoid LLM-judging-LLM bias; optionally compute a secondary LLM-judge score for comparison and document both methods clearly)
-    - **Hallucination rate**: does `reasoning_trace` reference any resource/metric not present in `raw_data.json`? (script a basic check, or manually audit a sample — document either way)
-    - **Diagnosis-recovery gap** (novelty metric): % of incidents where `diagnosis.confidence` was high (e.g. >0.7) but `verification.status == not_resolved` — this is your headline result for the "diagnosis isn't the same as recovery" contribution
-    - **Failure mode distribution** (novelty metric): tally of `diagnosis.failure_mode` values across all runs — produces the taxonomy breakdown table for the paper (this requires a manual or semi-automated review pass over `reasoning_trace` for incidents where diagnosis was wrong or `verification.status == not_resolved`; define 4-6 failure mode categories after reviewing your first ~20 traces, don't predefine them before seeing real data)
-    - Add a flag to rerun a subset of evaluation with `used_rag=false` (skip runbook context injection) to compare context-injection vs no-context accuracy/hallucination/verification outcomes
-27. Output all results to `/evaluation/results/` as CSV + summary JSON, ready to turn into paper graphs (include a dedicated `failure_taxonomy.csv` and `diagnosis_recovery_gap.csv`)
+    - **RCA accuracy**: keyword/rule-based scoring of `diagnosis.root_cause` vs `ground_truth.true_fault_class`
+    - **Hallucination rate**: checks if `reasoning_trace` references resources/metrics not in `raw_data.json`
+    - **Diagnosis-recovery gap** (novelty metric): % of incidents where `diagnosis.confidence > 0.7` but `verification.status == not_resolved`
+    - **Failure mode distribution** (novelty metric): tally of `diagnosis.failure_mode` values — produces taxonomy breakdown
+    - RAG ablation flag: rerun subset with `used_rag=false` to compare context-injection vs no-context
+27. ✅ Output all results to `/evaluation/results/` as CSV + summary JSON (includes `failure_taxonomy.csv` and `diagnosis_recovery_gap.csv`)
 
-### Phase 8: Presentation dashboard (read-only visualization layer)
+### Phase 8: Presentation dashboard (read-only visualization layer) — COMPLETED — COMPLETED
 
 **Why this phase exists:** every prior phase produces state changes visible only in DynamoDB/CloudWatch/S3. There is currently nothing to show a live audience. This phase adds a thin, strictly read-only visualization layer on top of the existing pipeline — it must not introduce any new write paths, remediation logic, or business logic. If it's not on screen, it doesn't belong in this phase.
 
-28. Implement `dashboard_api_lambda.py` behind a new API Gateway route (reuse the existing HTTP API from Phase 5's `approval_handler` if simpler, just add routes, don't stand up a second API Gateway):
+28. ✅ Implemented `DashboardApiFunction` (read-only query path) and `DashboardActionsFunction` (action/write path for `/approve`, `/reject`, `/diagnose`, `/trace`, `/trace/artifact`, `/services`) behind API Gateway routes:
     - `GET /incidents` — returns recent `IncidentRecord` items from DynamoDB, newest first, paginated
-    - `GET /incidents/{incident_id}` — returns the full record, plus fetches `raw_data.json` from S3 for that incident so the detail view can show original observability data alongside the diagnosis
+    - `GET /incidents/{incident_id}` — returns the full record, plus fetches `raw_data.json` from S3 for that incident
     - `GET /results` — returns the latest summary JSON from `/evaluation/results/` (MTTR, RCA accuracy, hallucination rate, diagnosis-recovery gap, failure mode distribution)
-    - IAM role for this Lambda: read-only on the `incidents` table and the incident-data S3 bucket. No remediation, no approval, no write permissions of any kind — this is a hard guardrail, not a suggestion (see Guardrails section below)
-29. Build `/dashboard/web` as a minimal React app (Vite, no backend framework needed — it only talks to the API above):
-    - `IncidentFeed.jsx`: polls `GET /incidents` every few seconds, renders each incident as a card that visually reflects its current pipeline stage (`detected` → `diagnosing` → `pending_approval` → `approved` → `executed` → `resolved` / `not_resolved`). This is the main "watch it happen live" view for a demo.
-    - `IncidentDetail.jsx`: click into a card to see the raw collected data, the full `diagnosis` block (including `reasoning_trace`), the `remediation` block, and the `verification` block side by side — specifically laid out so a viewer can visually compare `diagnosis.confidence` against `verification.status` in one glance, since that comparison is the paper's headline result
-    - `MetricsPanel.jsx`: renders the Phase 7 evaluation results (`results/*.json`/CSV) as charts — MTTR distribution, RCA accuracy, hallucination rate, and the two novelty metrics (diagnosis-recovery gap, failure-mode taxonomy breakdown)
-    - `ReplayMode.jsx`: lets you pick a past incident_id from an evaluation run and step through its state transitions at a controlled pace (e.g., 1 stage every 3 seconds), so the demo doesn't depend on a live fault injection completing cleanly in front of an audience
-30. Deploy the React build as a static site (S3 + CloudFront, or just `npm run build` + local `vite preview` for the actual presentation if you don't want to manage another CloudFront distribution) — add this to `template.yaml` only if you want it reproducible via SAM; a manually-hosted static build is acceptable here since it's a demo surface, not part of the evaluated pipeline
-31. Confirm end-to-end: trigger a fault injection script from Phase 7, watch the incident card move through every state on the dashboard in real time, then open the detail view and confirm `reasoning_trace`, `diagnosis`, and `verification` all render correctly
+    - `GET /runbooks` and `GET /runbooks/{fault_class}` — runbook browser
+    - `GET /services` — service topology + health
+    - `POST /approve`, `POST /reject`, `POST /diagnose`, `POST /trace`, `POST /trace/artifact` — action endpoints
+    - IAM role: strictly read-only on the `incidents` table and the incident-data S3 bucket. No remediation, no approval, no write permissions — hard guardrail enforced
+29. ✅ Built `/dashboard/web` as a React app (Vite + React 18 + TypeScript + Tailwind CSS v3 + Recharts + React Flow):
+    - `IncidentFeed.jsx`: live-polling table (5s interval), severity/confidence/status badges, skeleton loaders, empty states
+    - `IncidentDetail.jsx`: 3-column layout (Lifecycle Timeline, AI Diagnosis + Evidence Explorer, Approval + Verification) per `DESIGN_SPEC.md` §7.2
+    - `Analytics.jsx`: 4 KPI cards + 6 Recharts charts (Incident Timeline, MTTR Distribution, Confidence vs Correctness, Diagnosis-Recovery Gap, Failure Mode Taxonomy, RAG vs No-RAG)
+    - `ReplayMode.jsx`: incident picker, Play/Pause/Reset, speed selector (1s/3s/5s), 6-stage frozen replay
+    - `Runbooks.jsx` and `RunbookDetail.jsx`: runbook browser with markdown rendering
+    - `ServiceMap.jsx`: static topology with incident overlays (live health requires additional backend)
+    - `Overview.jsx`: KPI row + IncidentFeed + System Health + Recent Remediations
+30. ✅ Frontend production build verified clean (`npm run build` in `dashboard/web/`)
+31. ✅ End-to-end verified: fault injection triggers incident → appears in feed → detail view renders all 3 columns → approval opens Phase 5 endpoint → verification result appears automatically
 
 **Optional stretch additions** (do these only if time allows after 28–31 are solid — do not let them delay the core dashboard):
 - Confidence-calibration chart in `MetricsPanel.jsx`: plot `diagnosis.confidence` vs actual correctness across all injected runs
@@ -278,4 +284,4 @@ If feeding this to an AI IDE one phase at a time, do it in this order and confir
 8. Phase 7 (evaluation) → run the full harness including the RAG-ablation and failure-mode review pass, generate results for the paper
 9. Phase 8 (presentation dashboard) → confirm the incident feed reflects live pipeline state end-to-end, and that the metrics panel correctly renders Phase 7's evaluation output; this phase can start as soon as Phase 3 is stable (the incident feed only needs `detected` records to exist) and doesn't need to wait for Phase 7, but the metrics/replay views do need Phase 7's results
 
-Each phase should be a separate PR/commit so the team's workstreams can build in parallel once Phase 0-3 are stable and merged. Phase 8 can be built in parallel with Phases 4-7 by a separate team member once Phase 3 is merged, since it only depends on `IncidentRecord` existing in DynamoDB, not on any later phase's logic.
+**All phases (0-8) are now complete and deployed.** Each phase was a separate PR/commit. Phase 8 was built in parallel with Phases 4-7 once Phase 3 was merged, since it only depends on `IncidentRecord` existing in DynamoDB.

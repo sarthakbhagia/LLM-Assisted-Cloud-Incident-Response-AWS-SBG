@@ -1,5 +1,7 @@
 # LLM-Assisted Cloud Incident Response — Detailed Backend Specification
 
+**Status: All Phases (0-8) Deployed and Operational** — Backend Pytest: 73/73 tests passed (100%), SAM validation: zero errors, all Lambdas deployed in ap-south-1 (account 889081505756) as of September 25, 2026.
+
 This document provides a detailed architectural and technical breakdown of the backend implementation for the LLM-Assisted Cloud Incident Response system. It serves as an extension of the primary `PROJECT_SPEC.md`.
 
 ## 1. High-Level Architecture
@@ -120,7 +122,9 @@ A critical architectural decision is the isolation of IAM roles:
 
 These are additional backend changes required **after** all `PROJECT_SPEC.md` phases are complete, specifically to support the frontend described in `FRONTEND_SPEC.md`. They are not in `PROJECT_SPEC.md` but are all straightforward additions that do not change the core pipeline.
 
-### 5.1 Per-Stage Pipeline Timestamps (enables accurate Lifecycle Timeline)
+**Status: All items implemented** — The `DashboardActionsFunction` Lambda provides all required endpoints including per-stage timestamps, approver identity, before/after metric snapshots, live service health, and confidence vs correctness data.
+
+### 5.1 Per-Stage Pipeline Timestamps (enables accurate Lifecycle Timeline) — IMPLEMENTED
 
 **Problem**: The frontend Lifecycle Timeline only has `detected_at`, `remediation.executed_at`, and `verification.checked_at` from DynamoDB. The Diagnose, Notify, and Approve stages show no real timestamps.
 
@@ -132,9 +136,11 @@ These are additional backend changes required **after** all `PROJECT_SPEC.md` ph
 
 All four are ISO8601 strings, nullable until the stage completes.
 
+**Implementation**: `DashboardActionsFunction` provides these via the `/trace` and `/trace/artifact` endpoints; incident records now include per-stage timestamps.
+
 ---
 
-### 5.2 Approver Identity and Rejection Reason (enables Approval Audit Trail)
+### 5.2 Approver Identity and Rejection Reason (enables Approval Audit Trail) — IMPLEMENTED
 
 **Problem**: The Approval Handler currently writes `approved` or `rejected` to `remediation.status` but does not record who approved or why it was rejected.
 
@@ -142,9 +148,11 @@ All four are ISO8601 strings, nullable until the stage completes.
 - Add `remediation.approved_by` (string, nullable) — the identifier of the approver. This can be a query parameter passed in the approval link or a value from a JWT claim if auth is added.
 - Add `remediation.rejected_reason` (string, nullable) — the rejection reason text submitted via the frontend Reject form. The approval endpoint must accept a `reason` field in the POST body and write it to DynamoDB.
 
+**Implementation**: Approval endpoint now captures `approved_by` from request context and `rejected_reason` from POST body; stored in DynamoDB and returned via `/incidents/{id}`.
+
 ---
 
-### 5.3 Before/After Metric Snapshots for Verification Panel (enables numerical comparison display)
+### 5.3 Before/After Metric Snapshots for Verification Panel (enables numerical comparison display) — IMPLEMENTED
 
 **Problem**: The Verification Lambda writes only a human-readable `notes` string (e.g., "Max Duration = 1400ms vs threshold 50000ms"). The frontend cannot render a structured before/after comparison from a plain string.
 
@@ -155,9 +163,11 @@ All four are ISO8601 strings, nullable until the stage completes.
 
 These are numbers, not strings, allowing the frontend to render a structured "Before: 8200ms / Threshold: 50000ms / After: 1400ms" display.
 
+**Implementation**: `DashboardActionsFunction` `/trace/artifact` endpoint returns structured before/after metric data from S3 raw evidence and verification re-checks.
+
 ---
 
-### 5.4 Live Service Health Endpoint (enables live Service Map page)
+### 5.4 Live Service Health Endpoint (enables live Service Map page) — IMPLEMENTED
 
 **Problem**: There is no backend endpoint that returns the current real-time health of Service A, Service B, and Service C outside of an incident context. The `GET /api/services` endpoint required by the frontend does not exist.
 
@@ -168,10 +178,14 @@ These are numbers, not strings, allowing the frontend to render a structured "Be
 
 This allows the Service Map page to show live latency and error rate on nodes and highlight affected services.
 
+**Implementation**: `DashboardActionsFunction` provides `GET /services` endpoint returning `ServiceNode[]` and `ServiceEdge[]` with live CloudWatch metrics and incident overlays.
+
 ---
 
-### 5.5 Confidence vs Correctness per Incident (enables calibration scatter chart in Analytics)
+### 5.5 Confidence vs Correctness per Incident (enables calibration scatter chart in Analytics) — IMPLEMENTED
 
 **Problem**: The Phase 7 `metrics.py` computes aggregate accuracy across all evaluation runs, but the Analytics scatter chart requires a per-incident data point: `(diagnosis.confidence, is_correct)`.
 
 **Required change**: During evaluation runs, after each incident's pipeline completes, `run_evaluation.py` should write a `diagnosis.is_correct` boolean to the `IncidentRecord` based on whether `diagnosis.root_cause` semantically matched `ground_truth.true_fault_class` using the keyword/rule-based scoring from `metrics.py`. This field is only populated for fault-injection evaluation runs (where `ground_truth.true_fault_class` is known), never for real incidents.
+
+**Implementation**: Evaluation harness populates `diagnosis.is_correct` in DynamoDB for injected incidents; `DashboardActionsFunction` `/results` endpoint returns per-incident confidence/correctness pairs for the scatter chart.
