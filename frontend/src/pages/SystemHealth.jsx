@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
+import { apiClient } from '../config/api'
 import {
   CheckCircle2, XCircle, Clock, RefreshCw, Zap,
   Database, Cloud, BrainCircuit, Activity, Server,
@@ -139,8 +140,7 @@ export default function SystemHealth() {
     setChecking(true)
     setError(null)
     try {
-      const res = await fetch('/health/aws')
-      const data = await res.json()
+      const data = await apiClient.getHealth()
       setHealth(data)
       setLastCheck(new Date())
     } catch (err) {

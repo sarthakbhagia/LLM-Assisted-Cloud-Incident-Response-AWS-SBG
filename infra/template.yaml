@@ -184,10 +184,59 @@ Resources:
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
+              # Direct foundation-model ARNs (us/eu/ap regional direct invocation)
+              # Nova Pro/Micro are region-specific; grant all APAC regions where apac profile routes
               - Effect: Allow
                 Action:
                   - bedrock:InvokeModel
-                Resource: '*'
+                  - bedrock:InvokeModelWithResponseStream
+                Resource:
+                  - "arn:aws:bedrock:ap-south-1::foundation-model/amazon.nova-pro-v1:0"
+                  - "arn:aws:bedrock:ap-southeast-1::foundation-model/amazon.nova-pro-v1:0"
+                  - "arn:aws:bedrock:ap-southeast-2::foundation-model/amazon.nova-pro-v1:0"
+                  - "arn:aws:bedrock:ap-northeast-1::foundation-model/amazon.nova-pro-v1:0"
+                  - "arn:aws:bedrock:ap-northeast-2::foundation-model/amazon.nova-pro-v1:0"
+                  - "arn:aws:bedrock:ap-northeast-3::foundation-model/amazon.nova-pro-v1:0"
+                  - "arn:aws:bedrock:ap-south-1::foundation-model/amazon.nova-micro-v1:0"
+                  - "arn:aws:bedrock:ap-southeast-1::foundation-model/amazon.nova-micro-v1:0"
+                  - "arn:aws:bedrock:ap-southeast-2::foundation-model/amazon.nova-micro-v1:0"
+                  - "arn:aws:bedrock:ap-northeast-1::foundation-model/amazon.nova-micro-v1:0"
+                  - "arn:aws:bedrock:ap-northeast-2::foundation-model/amazon.nova-micro-v1:0"
+                  - "arn:aws:bedrock:ap-northeast-3::foundation-model/amazon.nova-micro-v1:0"
+                  - "arn:aws:bedrock:*::foundation-model/meta.llama3-70b-instruct-v1:0"
+                  - "arn:aws:bedrock:*::foundation-model/mistral.mistral-large-2402-v1:0"
+              # Cross-region inference profiles (apac.* prefix used by the diagnosis code)
+              # These have a different ARN shape: bedrock:<region>:<account>:inference-profile/<id>
+              # The apac profiles can route to any APAC region; grant all possible target regions
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                Resource:
+                  - !Sub "arn:aws:bedrock:ap-south-1:${AWS::AccountId}:inference-profile/apac.amazon.nova-pro-v1:0"
+                  - !Sub "arn:aws:bedrock:ap-southeast-1:${AWS::AccountId}:inference-profile/apac.amazon.nova-pro-v1:0"
+                  - !Sub "arn:aws:bedrock:ap-southeast-2:${AWS::AccountId}:inference-profile/apac.amazon.nova-pro-v1:0"
+                  - !Sub "arn:aws:bedrock:ap-northeast-1:${AWS::AccountId}:inference-profile/apac.amazon.nova-pro-v1:0"
+                  - !Sub "arn:aws:bedrock:ap-northeast-2:${AWS::AccountId}:inference-profile/apac.amazon.nova-pro-v1:0"
+                  - !Sub "arn:aws:bedrock:ap-northeast-3:${AWS::AccountId}:inference-profile/apac.amazon.nova-pro-v1:0"
+                  - !Sub "arn:aws:bedrock:ap-south-1:${AWS::AccountId}:inference-profile/apac.amazon.nova-micro-v1:0"
+                  - !Sub "arn:aws:bedrock:ap-southeast-1:${AWS::AccountId}:inference-profile/apac.amazon.nova-micro-v1:0"
+                  - !Sub "arn:aws:bedrock:ap-southeast-2:${AWS::AccountId}:inference-profile/apac.amazon.nova-micro-v1:0"
+                  - !Sub "arn:aws:bedrock:ap-northeast-1:${AWS::AccountId}:inference-profile/apac.amazon.nova-micro-v1:0"
+                  - !Sub "arn:aws:bedrock:ap-northeast-2:${AWS::AccountId}:inference-profile/apac.amazon.nova-micro-v1:0"
+                  - !Sub "arn:aws:bedrock:ap-northeast-3:${AWS::AccountId}:inference-profile/apac.amazon.nova-micro-v1:0"
+                  - !Sub "arn:aws:bedrock:ap-south-1:${AWS::AccountId}:inference-profile/apac.meta.llama3-70b-instruct-v1:0"
+                  - !Sub "arn:aws:bedrock:ap-southeast-1:${AWS::AccountId}:inference-profile/apac.meta.llama3-70b-instruct-v1:0"
+                  - !Sub "arn:aws:bedrock:ap-southeast-2:${AWS::AccountId}:inference-profile/apac.meta.llama3-70b-instruct-v1:0"
+                  - !Sub "arn:aws:bedrock:ap-northeast-1:${AWS::AccountId}:inference-profile/apac.meta.llama3-70b-instruct-v1:0"
+                  - !Sub "arn:aws:bedrock:ap-northeast-2:${AWS::AccountId}:inference-profile/apac.meta.llama3-70b-instruct-v1:0"
+                  - !Sub "arn:aws:bedrock:ap-northeast-3:${AWS::AccountId}:inference-profile/apac.meta.llama3-70b-instruct-v1:0"
+                  - !Sub "arn:aws:bedrock:ap-south-1:${AWS::AccountId}:inference-profile/apac.mistral.mistral-large-2402-v1:0"
+                  - !Sub "arn:aws:bedrock:ap-southeast-1:${AWS::AccountId}:inference-profile/apac.mistral.mistral-large-2402-v1:0"
+                  - !Sub "arn:aws:bedrock:ap-southeast-2:${AWS::AccountId}:inference-profile/apac.mistral.mistral-large-2402-v1:0"
+                  - !Sub "arn:aws:bedrock:ap-northeast-1:${AWS::AccountId}:inference-profile/apac.mistral.mistral-large-2402-v1:0"
+                  - !Sub "arn:aws:bedrock:ap-northeast-2:${AWS::AccountId}:inference-profile/apac.mistral.mistral-large-2402-v1:0"
+                  - !Sub "arn:aws:bedrock:ap-northeast-3:${AWS::AccountId}:inference-profile/apac.mistral.mistral-large-2402-v1:0"
         - PolicyName: invoke-downstream-lambdas
           PolicyDocument:
             Version: '2012-10-17'
@@ -196,10 +245,14 @@ Resources:
                 Action:
                   - lambda:InvokeFunction
                 Resource:
-                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:llm-incident-response-${Environment}-DiagnosisFunction*"
-                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:llm-incident-response-${Environment}-NotifyFunction*"
-                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:llm-incident-response-${Environment}-RemediationFunction*"
-                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:llm-incident-response-${Environment}-ApprovalFunction*"
+                  # Stack-scoped wildcard: avoids circular dependency (functions reference this role)
+                  # and correctly matches SAM-generated names like {StackName}-{LogicalId}-{Random}
+                  # with no ${Environment} segment. The prefix is intentionally not including
+                  # the environment so it works for any stack deployed from this template.
+                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${AWS::StackName}-DiagnosisFunction*"
+                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${AWS::StackName}-NotifyFunction*"
+                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${AWS::StackName}-RemediationFunction*"
+                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${AWS::StackName}-ApprovalFunction*"
 
 
   # ---------------------------------------------------------------------------
@@ -232,8 +285,11 @@ Resources:
               - Effect: Allow
                 Action:
                   - s3:GetObject
-                  - s3:PutPublicAccessBlock
                 Resource: !Sub "${IncidentDataLake.Arn}/incidents/*"
+              - Effect: Allow
+                Action:
+                  - s3:PutPublicAccessBlock
+                Resource: !GetAtt IncidentDataLake.Arn
               - Effect: Allow
                 Action:
                   - cloudwatch:GetMetricStatistics
@@ -278,7 +334,7 @@ Resources:
                 Action:
                   - lambda:InvokeFunction
                 Resource:
-                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:llm-incident-response-${Environment}-VerificationFunction*"
+                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${AWS::StackName}-VerificationFunction*"
 
   # ===========================================================================
   # PHASE 1 - DEMO APPLICATION
@@ -893,6 +949,16 @@ Resources:
           Properties:
             Path: /api/runbooks/{fault_class}
             Method: options
+        GetHealth:
+          Type: Api
+          Properties:
+            Path: /api/health
+            Method: get
+        GetHealthOptions:
+          Type: Api
+          Properties:
+            Path: /api/health
+            Method: options
 
 # DashboardApiFunctionApiPermission:
 #     Type: AWS::Lambda::Permission
@@ -905,6 +971,155 @@ Resources:
     Type: AWS::Lambda::Permission
     Properties:
       FunctionName: !Ref DashboardApiFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+
+  # ===========================================================================
+  # DASHBOARD ACTIONS FUNCTION
+  # Write-path and action routes (approve, reject, diagnose, trace, services).
+  # Kept separate from DashboardApiFunction to preserve its strict read-only
+  # IAM guardrail.  This function has narrow UpdateItem + Lambda:Invoke perms.
+  # ===========================================================================
+
+  DashboardActionsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "incident-dashboard-actions-role-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: incidents-table-actions
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Read: look up incident before approve/reject/diagnose
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                Resource: !GetAtt IncidentsTable.Arn
+              # Write: approve and reject update remediation.status only
+              - Effect: Allow
+                Action:
+                  - dynamodb:UpdateItem
+                Resource: !GetAtt IncidentsTable.Arn
+        - PolicyName: datalake-trace-read
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt IncidentDataLake.Arn
+                  - !Sub "${IncidentDataLake.Arn}/incidents/*"
+        - PolicyName: invoke-diagnosis-function
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource: !GetAtt DiagnosisFunction.Arn
+        - PolicyName: invoke-remediation-function
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource: !GetAtt RemediationFunction.Arn
+
+  DashboardActionsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../backend/dashboard_api/
+      Handler: dashboard_actions_lambda.lambda_handler
+      Role: !GetAtt DashboardActionsRole.Arn
+      Description: >-
+        Dashboard write-path actions: approve, reject, diagnose, trace, services.
+        Separate from DashboardApiFunction to preserve its read-only IAM guardrail.
+      Timeout: 30
+      MemorySize: 256
+      Environment:
+        Variables:
+          INCIDENTS_TABLE: !Ref IncidentsTable
+          DATA_LAKE_BUCKET: !Ref IncidentDataLake
+          DIAGNOSIS_FUNCTION_NAME: !Ref DiagnosisFunction
+          REMEDIATION_FUNCTION_NAME: !Ref RemediationFunction
+      Events:
+        ApproveIncident:
+          Type: Api
+          Properties:
+            Path: /api/incidents/{incident_id}/approve
+            Method: post
+        ApproveIncidentOptions:
+          Type: Api
+          Properties:
+            Path: /api/incidents/{incident_id}/approve
+            Method: options
+        RejectIncident:
+          Type: Api
+          Properties:
+            Path: /api/incidents/{incident_id}/reject
+            Method: post
+        RejectIncidentOptions:
+          Type: Api
+          Properties:
+            Path: /api/incidents/{incident_id}/reject
+            Method: options
+        DiagnoseIncident:
+          Type: Api
+          Properties:
+            Path: /api/incidents/{incident_id}/diagnose
+            Method: post
+        DiagnoseIncidentOptions:
+          Type: Api
+          Properties:
+            Path: /api/incidents/{incident_id}/diagnose
+            Method: options
+        GetTrace:
+          Type: Api
+          Properties:
+            Path: /api/incidents/{incident_id}/trace
+            Method: get
+        GetTraceOptions:
+          Type: Api
+          Properties:
+            Path: /api/incidents/{incident_id}/trace
+            Method: options
+        GetTraceArtifact:
+          Type: Api
+          Properties:
+            Path: /api/incidents/{incident_id}/trace/artifact
+            Method: get
+        GetTraceArtifactOptions:
+          Type: Api
+          Properties:
+            Path: /api/incidents/{incident_id}/trace/artifact
+            Method: options
+        GetServices:
+          Type: Api
+          Properties:
+            Path: /api/services
+            Method: get
+        GetServicesOptions:
+          Type: Api
+          Properties:
+            Path: /api/services
+            Method: options
+
+  DashboardActionsFunctionApiPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref DashboardActionsFunction
       Action: lambda:InvokeFunction
       Principal: apigateway.amazonaws.com
 
@@ -994,3 +1209,11 @@ Outputs:
   DashboardApiRoleArn:
     Description: ARN of the Phase 8 read-only dashboard IAM role (no write permissions)
     Value: !GetAtt DashboardApiRole.Arn
+
+  DashboardActionsFunctionArn:
+    Description: ARN of the dashboard actions Lambda (approve, reject, diagnose, trace, services)
+    Value: !GetAtt DashboardActionsFunction.Arn
+
+  DashboardActionsRoleArn:
+    Description: ARN of the dashboard actions IAM role (narrowly-scoped write + invoke)
+    Value: !GetAtt DashboardActionsRole.Arn

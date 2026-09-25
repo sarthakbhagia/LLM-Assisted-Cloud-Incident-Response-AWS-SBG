@@ -31,16 +31,19 @@ class E2ETestRunner:
         self.test_results = {}
         
     def _load_environment(self):
-        """Load environment configuration from env.json or defaults"""
+        """Load environment configuration from env.json, environment variables, or defaults"""
+        config = {
+            "environment": os.environ.get("ENVIRONMENT", "dev"),
+            "region": os.environ.get("AWS_REGION", os.environ.get("AWS_DEFAULT_REGION", "ap-south-1")),
+            "api_url": os.environ.get("SERVICE_A_URL", "https://o212lf1md4.execute-api.ap-south-1.amazonaws.com/Prod/start")
+        }
         try:
             with open('env.json', 'r') as f:
-                return json.load(f)
+                file_config = json.load(f)
+                config.update(file_config)
         except FileNotFoundError:
             logger.warning("env.json not found, using defaults")
-            return {
-                "environment": "dev",
-                "region": "us-east-1"
-            }
+        return config
     
     def test_phase_0_infrastructure(self):
         """Test Phase 0: Verify core infrastructure is deployed"""
@@ -357,9 +360,11 @@ class E2ETestRunner:
                     logger.error(f"✗ Service communication failed: {response.status_code}")
                     self.test_results['service_communication'] = False
             else:
-                # Try the known API Gateway URL from stack outputs
+                # Try the configured API Gateway URL or canonical dev URL
                 try:
-                    test_url = "https://0jqdaxn8k1.execute-api.ap-south-1.amazonaws.com/Prod/start"
+                    test_url = os.environ.get("SERVICE_A_URL", self.env.get("api_url", f"https://o212lf1md4.execute-api.{self.env.get('region', 'ap-south-1')}.amazonaws.com/Prod/start"))
+                    if not test_url.endswith("/start"):
+                        test_url = f"{test_url.rstrip('/')}/start"
                     response = requests.get(test_url, timeout=30)
                     
                     if response.status_code == 200:

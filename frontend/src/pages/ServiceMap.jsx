@@ -34,25 +34,30 @@ const NODE_H = 72
 
 export default function ServiceMap() {
   const [incidents, setIncidents] = useState([])
+  const [servicesData, setServicesData] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
 
-  const fetchIncidents = async () => {
+  const fetchData = async () => {
     try {
-      const data = await apiClient.getIncidents({ limit: 50 })
-      setIncidents(data?.items || [])
+      const [incidentsRes, servicesRes] = await Promise.all([
+        apiClient.getIncidents({ limit: 50 }),
+        apiClient.getServices().catch(() => ({ services: [] }))
+      ])
+      setIncidents(incidentsRes?.items || [])
+      setServicesData(servicesRes?.services || [])
       setError(null)
     } catch (err) {
-      console.error('Failed to fetch incidents for service map:', err)
-      setError('Could not load incident overlays')
+      console.error('Failed to fetch data for service map:', err)
+      setError('Could not load service health data')
     } finally {
       setLoading(false)
     }
   }
 
   useEffect(() => {
-    fetchIncidents()
-    const interval = setInterval(fetchIncidents, POLLING_INTERVALS.INCIDENTS_FEED)
+    fetchData()
+    const interval = setInterval(fetchData, POLLING_INTERVALS.INCIDENTS_FEED)
     return () => clearInterval(interval)
   }, [])
 
@@ -75,11 +80,21 @@ export default function ServiceMap() {
       .flatMap(([, incs]) => incs)
   }
 
+  // Merge backend services metadata with static topology layout
+  const topology = SERVICE_TOPOLOGY.map(node => {
+    const svcMeta = servicesData.find(s => s.name === node.id)
+    return {
+      ...node,
+      role: svcMeta?.role || node.description,
+      faultClasses: svcMeta?.fault_classes || []
+    }
+  })
+
   // Build SVG edges
   const edges = []
-  SERVICE_TOPOLOGY.forEach(node => {
+  topology.forEach(node => {
     node.outputs.forEach(targetId => {
-      const target = SERVICE_TOPOLOGY.find(s => s.id === targetId)
+      const target = topology.find(s => s.id === targetId)
       if (!target) return
       const x1 = node.x + NODE_W
       const y1 = node.y + NODE_H / 2
@@ -99,22 +114,12 @@ export default function ServiceMap() {
         <div>
           <h1 className="text-lg font-semibold text-text-primary">Service Map</h1>
           <p className="text-xs text-text-muted mt-0.5">
-            Static topology of the three known Lambda services
+            Live health topology and active incident overlays for microservices
           </p>
         </div>
-        <button onClick={fetchIncidents} className="btn-ghost" title="Refresh">
+        <button onClick={fetchData} className="btn-ghost" title="Refresh">
           <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
         </button>
-      </div>
-
-      {/* Backend notice */}
-      <div className="flex items-start space-x-2 p-3 bg-amber-surface border border-amber/20 rounded-card">
-        <Info className="w-4 h-4 text-amber flex-shrink-0 mt-0.5" />
-        <p className="text-xs text-text-secondary">
-          Live service health data requires the <span className="mono text-text-primary">GET /api/services</span> endpoint
-          (additional backend work — see <span className="mono text-text-primary">BACKEND_SPEC.md</span>).
-          This diagram shows a static topology with active incident overlays only.
-        </p>
       </div>
 
       {error && (

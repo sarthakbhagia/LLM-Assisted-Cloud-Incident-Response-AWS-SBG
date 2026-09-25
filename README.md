@@ -222,8 +222,19 @@ You'll need a Mac/Linux machine and an AWS account with credentials.
    sam build
    sam deploy
    ```
-   Use the `samconfig.toml` already in the repo if prompted, or pass
-   `--stack-name llm-incident-response --region ap-south-1 --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM`.
+   Use the `samconfig.toml` already in the repo if prompted, or pass:
+   ```bash
+   # Main stack (dev environment)
+   sam deploy --stack-name llm-incident-response --region ap-south-1 \
+     --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
+     --parameter-overrides Environment=dev
+
+   # Demo control stack (dev environment)
+   sam deploy --template demo-control-template.yaml \
+     --stack-name llm-incident-response-demo-dev --region ap-south-1 \
+     --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
+     --parameter-overrides Environment=dev MainStackName=llm-incident-response
+   ```
 
 5. **Run tests**
    Execute the automated unit test suite covering all implemented phases:

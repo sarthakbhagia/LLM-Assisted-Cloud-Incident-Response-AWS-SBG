@@ -28,7 +28,7 @@ class TestFaultInjection(unittest.TestCase):
     def test_inject_misconfiguration_dry_run(self):
         res = inject_misconfiguration(environment="test", dry_run=True)
         self.assertEqual(res["fault_class"], "misconfiguration")
-        self.assertEqual(res["target_resource"], "llm-incident-response-data-lake-test")
+        self.assertEqual(res["target_resource"], "llm-incident-datalake-889081505756-test")
         self.assertEqual(res["status"], "simulated_injection")
         self.assertTrue(res["dry_run"])
 

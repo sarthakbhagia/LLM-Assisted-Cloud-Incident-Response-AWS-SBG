@@ -100,8 +100,12 @@ export default function Layout({ children }) {
             </div>
             {!sidebarCollapsed && (
               <div className="flex-1 min-w-0">
-                <div className="text-xs text-text-primary font-medium">Production</div>
-                <div className="text-xs text-text-muted">ap-south-1</div>
+                <div className="text-xs text-text-primary font-medium capitalize">
+                  {import.meta.env.VITE_ENVIRONMENT || (import.meta.env.MODE === 'production' ? 'dev' : import.meta.env.MODE)}
+                </div>
+                <div className="text-xs text-text-muted">
+                  {import.meta.env.VITE_AWS_REGION || 'ap-south-1'}
+                </div>
               </div>
             )}
           </div>

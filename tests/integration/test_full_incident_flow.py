@@ -31,7 +31,7 @@ class FullIncidentFlowTest:
         self.environment = os.environ.get('ENVIRONMENT', 'dev')
         self.incidents_table = os.environ.get('INCIDENTS_TABLE', f'incidents-{self.environment}')
         self.data_lake_bucket = os.environ.get('DATA_LAKE_BUCKET', f'llm-incident-datalake-{self.account_id}-{self.environment}')
-        self.service_a_url = os.environ.get('SERVICE_A_URL', f'https://0jqdaxn8k1.execute-api.{self.region}.amazonaws.com/Prod/start')
+        self.service_a_url = os.environ.get('SERVICE_A_URL', f'https://o212lf1md4.execute-api.{self.region}.amazonaws.com/Prod/start')
         
     def trigger_resource_exhaustion(self):
         """Trigger a resource exhaustion scenario by making many rapid requests"""

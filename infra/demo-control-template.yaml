@@ -5,11 +5,11 @@ Description: Demo Mode Control Lambda - separate stack
 Parameters:
   Environment:
     Type: String
-    Default: staging
+    Default: dev
     AllowedValues: [dev, staging, prod]
   MainStackName:
     Type: String
-    Default: llm-incident-response-staging
+    Default: llm-incident-response
     Description: Name of the main incident response stack to import values from
 
 Resources:
@@ -36,7 +36,7 @@ Resources:
                 Action:
                   - lambda:InvokeFunction
                 Resource:
-                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:llm-incident-response-${Environment}-ApprovalFunction*"
+                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:*ApprovalFunction*"
         - PolicyName: demo-cloudwatch-alarms
           PolicyDocument:
             Version: '2012-10-17'

@@ -75,11 +75,12 @@ LLAMA_SYSTEM_PROMPT = f"""<|begin_of_text|><|start_header_id|>system<|end_header
 {NOVA_SYSTEM_PROMPT}
 <|eot_id|><|start_header_id|>user<|end_header_id|>
 
-{{prompt}}<|eot_id|><|start_header_id|>assistant<|end_header_id|>"""
+__PROMPT__<|eot_id|><|start_header_id|>assistant<|end_header_id|>"""
 
 MISTRAL_SYSTEM_PROMPT = f"""<s>[INST] {SYSTEM_PROMPT}
 
-{NOVA_SYSTEM_PROMPT} [/INST]"""
+{NOVA_SYSTEM_PROMPT} [/INST]
+__PROMPT__"""
 
 
 def lambda_handler(event, context):
@@ -186,6 +187,7 @@ def _invoke_llm_with_validation(
     """
     raw_response = None
     failure_mode = None
+    model_used = None
 
     def _save_raw_response_to_s3(response_text: str, error_type: str) -> str | None:
         """Save raw LLM response to S3 for debugging. Returns S3 key or None on failure."""
@@ -210,22 +212,22 @@ def _invoke_llm_with_validation(
             logger.error(f"Failed to save raw response to S3: {e}")
             return None
 
-    def _attempt_llm_call(prompt: str, attempt_name: str) -> tuple[str | None, str | None, str | None]:
-        """Attempt LLM call and validation. Returns (validated_diag, raw_response, failure_mode)."""
+    def _attempt_llm_call(prompt: str, attempt_name: str) -> tuple[str | None, str | None, str | None, str | None]:
+        """Attempt LLM call and validation. Returns (validated_diag, raw_response, failure_mode, model_used)."""
         raw_resp = None
         try:
-            raw_resp, stop_reason, is_truncated = _call_bedrock(prompt)
-            logger.info(f"{attempt_name} LLM response (first 500 chars): {str(raw_resp)[:500]}, stop_reason: {stop_reason}, truncated: {is_truncated}")
+            raw_resp, stop_reason, is_truncated, model_name = _call_bedrock(prompt)
+            logger.info(f"{attempt_name} LLM response (first 500 chars): {str(raw_resp)[:500]}, stop_reason: {stop_reason}, truncated: {is_truncated}, model: {model_name}")
             
             if is_truncated:
                 failure = f"{attempt_name.lower()}_truncated: stop_reason={stop_reason}"
                 s3_key = _save_raw_response_to_s3(str(raw_resp), f"{attempt_name.lower()}_truncated")
                 if s3_key:
                     failure += f"; raw_saved_to_s3:{s3_key}"
-                return None, raw_resp, failure
+                return None, raw_resp, failure, model_name
             
             validated_diag = _parse_and_validate_json(raw_resp)
-            return validated_diag, raw_resp, None
+            return validated_diag, raw_resp, None, model_name
         except ValueError as exc:
             failure = None
             if "truncated" in str(exc).lower():
@@ -242,20 +244,22 @@ def _invoke_llm_with_validation(
                 s3_key = _save_raw_response_to_s3(str(raw_resp), f"{attempt_name.lower()}_validation_error")
                 if s3_key:
                     failure += f"; raw_saved_to_s3:{s3_key}"
-            return None, raw_resp, failure
+            return None, raw_resp, failure, model_name if 'model_name' in locals() else None
         except Exception as exc:  # noqa: BLE001
-            return None, raw_resp, f"{attempt_name.lower()}_error: {exc}"
+            return None, raw_resp, f"{attempt_name.lower()}_error: {exc}", model_name if 'model_name' in locals() else None
 
     # Attempt 1: Initial call
-    validated_diag, raw_response, failure_mode = _attempt_llm_call(user_prompt, "Initial")
+    validated_diag, raw_response, failure_mode, model_used = _attempt_llm_call(user_prompt, "Initial")
     if validated_diag is not None:
+        validated_diag["model_used"] = model_used
         return validated_diag, None
 
     # Attempt 2: Retry with correction prompt (if we got a raw response)
     if raw_response:
         correction_prompt = build_error_correction_prompt(raw_response, failure_mode or "unknown error")
-        validated_diag, second_response, retry_failure = _attempt_llm_call(correction_prompt, "Retry")
+        validated_diag, second_response, retry_failure, retry_model = _attempt_llm_call(correction_prompt, "Retry")
         if validated_diag is not None:
+            validated_diag["model_used"] = retry_model or model_used
             return validated_diag, "retry_succeeded"
         if retry_failure:
             failure_mode = retry_failure
@@ -268,13 +272,14 @@ def _invoke_llm_with_validation(
     # Fallback heuristic diagnosis if Bedrock is unreachable / unconfigured / parse failed
     fallback_diag = _generate_fallback_diagnosis(fault_class, raw_data)
     fallback_diag["diagnosis_status"] = "parse_failed"
+    fallback_diag["model_used"] = "heuristic"
     return fallback_diag, failure_mode or "fallback_heuristic_used"
 
 
-def _call_bedrock(prompt: str) -> tuple[str, str | None, bool]:
+def _call_bedrock(prompt: str) -> tuple[str, str | None, bool, str]:
     """Invoke Bedrock model with fallback chain: Nova Pro -> Llama 3 70B -> Mistral Large -> Nova Micro.
     
-    Returns (text, stop_reason, is_truncated).
+    Returns (text, stop_reason, is_truncated, model_name).
     """
     logger.info(f"_call_bedrock invoked with prompt length: {len(prompt)}")
     logger.info("_call_bedrock: Starting execution")
@@ -288,13 +293,16 @@ def _call_bedrock(prompt: str) -> tuple[str, str | None, bool]:
     }
 
     llama_payload = {
-        "prompt": LLAMA_SYSTEM_PROMPT.format(prompt=prompt),
+        # Use .replace() not .format() — SYSTEM_PROMPT contains literal JSON braces
+        # which would be misinterpreted as format placeholders and raise KeyError.
+        "prompt": LLAMA_SYSTEM_PROMPT.replace("__PROMPT__", prompt),
         "max_gen_len": MAX_TOKENS,
         "temperature": 0.1,
     }
 
     mistral_payload = {
-        "prompt": MISTRAL_SYSTEM_PROMPT.format(prompt=prompt),
+        # Use .replace() not .format() — same reason as llama_payload above.
+        "prompt": MISTRAL_SYSTEM_PROMPT.replace("__PROMPT__", prompt),
         "max_tokens": MAX_TOKENS,
         "temperature": 0.1,
     }
@@ -406,7 +414,7 @@ def _call_bedrock(prompt: str) -> tuple[str, str | None, bool]:
         is_truncated = stop_reason in ("max_tokens", "length")
         if is_truncated:
             logger.warning(f"Nova Pro output truncated (stop_reason={stop_reason})")
-        return result, stop_reason, is_truncated
+        return result, stop_reason, is_truncated, "Nova Pro"
     except Exception as e:  # SE-7: catch all, not just ClientError
         logger.warning(f"Nova Pro failed ({type(e).__name__}): {e}")
 
@@ -418,7 +426,7 @@ def _call_bedrock(prompt: str) -> tuple[str, str | None, bool]:
         is_truncated = stop_reason in ("max_tokens", "length")
         if is_truncated:
             logger.warning(f"Llama output truncated (stop_reason={stop_reason})")
-        return result, stop_reason, is_truncated
+        return result, stop_reason, is_truncated, "Llama 3 70B"
     except Exception as e:  # SE-7
         logger.warning(f"Llama failed ({type(e).__name__}): {e}")
 
@@ -429,7 +437,7 @@ def _call_bedrock(prompt: str) -> tuple[str, str | None, bool]:
         is_truncated = stop_reason in ("max_tokens", "length")
         if is_truncated:
             logger.warning(f"Mistral output truncated (stop_reason={stop_reason})")
-        return result, stop_reason, is_truncated
+        return result, stop_reason, is_truncated, "Mistral Large"
     except Exception as e:  # SE-7
         logger.warning(f"Mistral failed ({type(e).__name__}): {e}")
 
@@ -440,7 +448,7 @@ def _call_bedrock(prompt: str) -> tuple[str, str | None, bool]:
         is_truncated = stop_reason in ("max_tokens", "length")
         if is_truncated:
             logger.warning(f"Nova Micro output truncated (stop_reason={stop_reason})")
-        return result, stop_reason, is_truncated
+        return result, stop_reason, is_truncated, "Nova Micro"
     except Exception as final_exc:
         logger.error(f"All models failed: {final_exc}")
         raise RuntimeError("All Bedrock models failed")

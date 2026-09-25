@@ -130,7 +130,7 @@ Currently the buttons render but do nothing. Two options — pick one:
 
 **Option A (recommended for read-only dashboard):** Make the Approve button open the existing Phase 5 approval URL in a new tab:
 ```
-https://0jqdaxn8k1.execute-api.ap-south-1.amazonaws.com/Prod/approval?incident_id=<id>&action=approve
+https://o212lf1md4.execute-api.ap-south-1.amazonaws.com/Prod/approval?incident_id=<id>&action=approve
 ```
 Add a tooltip: "Opens Phase 5 approval endpoint". The dashboard stays purely read-only.
 
@@ -140,9 +140,9 @@ Add a tooltip: "Opens Phase 5 approval endpoint". The dashboard stays purely rea
 
 ### 3. Create `.env` files
 
-`dashboard/web/.env` does not exist. Create it:
+`frontend/.env` does not exist. Create it:
 ```
-VITE_API_BASE_URL=https://0jqdaxn8k1.execute-api.ap-south-1.amazonaws.com/Prod
+VITE_API_BASE_URL=https://o212lf1md4.execute-api.ap-south-1.amazonaws.com/Prod
 ```
 
 Also create `dashboard/web/.env.example`:

@@ -566,10 +566,8 @@ function PipelineTracePanel({ incidentId }) {
     setLoading(true)
     setError(null)
     try {
-      const resp = await fetch(`/api/incidents/${incidentId}/trace`)
-      const json = await resp.json()
-      if (json.error) throw new Error(json.error)
-      setTrace(json.data)
+      const data = await apiClient.getIncidentTrace(incidentId)
+      setTrace(data)
     } catch (err) {
       setError(err.message)
     } finally {
@@ -583,9 +581,8 @@ function PipelineTracePanel({ incidentId }) {
       return
     }
     try {
-      const resp = await fetch(`/api/incidents/${incidentId}/trace/artifact?key=${encodeURIComponent(key)}`)
-      const json = await resp.json()
-      const content = json.data?.content
+      const data = await apiClient.getIncidentTraceArtifact(incidentId, key)
+      const content = data?.content
       setArtifactContent(prev => ({
         ...prev,
         [key]: typeof content === 'string' ? content : JSON.stringify(content, null, 2)

@@ -4,8 +4,8 @@
 // In production: set VITE_API_BASE_URL to your API Gateway Prod stage URL, e.g.:
 //   VITE_API_BASE_URL=https://o212lf1md4.execute-api.ap-south-1.amazonaws.com/Prod
 //   VITE_DEMO_API_BASE_URL=https://0l32vjl4n8.execute-api.ap-south-1.amazonaws.com/Prod
-export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || ''
-export const DEMO_API_BASE_URL = import.meta.env.VITE_DEMO_API_BASE_URL || ''
+export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'https://5guo2bztz5.execute-api.ap-south-1.amazonaws.com/Prod'
+export const DEMO_API_BASE_URL = import.meta.env.VITE_DEMO_API_BASE_URL || 'https://0l32vjl4n8.execute-api.ap-south-1.amazonaws.com/Prod'
 
 export const API_ENDPOINTS = {
   INCIDENTS: '/api/incidents',
@@ -14,10 +14,12 @@ export const API_ENDPOINTS = {
   INCIDENT_APPROVE: (id) => `/api/incidents/${id}/approve`,
   INCIDENT_REJECT: (id) => `/api/incidents/${id}/reject`,
   INCIDENT_DIAGNOSE: (id) => `/api/incidents/${id}/diagnose`,
+  INCIDENT_TRACE: (id) => `/api/incidents/${id}/trace`,
+  INCIDENT_TRACE_ARTIFACT: (id, key) => `/api/incidents/${id}/trace/artifact?key=${encodeURIComponent(key)}`,
   ANALYTICS: '/api/analytics',
   RUNBOOKS: '/api/runbooks',
   RUNBOOK: (faultClass) => `/api/runbooks/${faultClass}`,
-  HEALTH: '/health'
+  HEALTH: '/api/health'
 }
 
 export const DEMO_ENDPOINTS = {
@@ -46,12 +48,17 @@ class ApiClient {
 
     try {
       const response = await fetch(url, config)
-      
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`)
+      let json = null
+      try {
+        json = await response.json()
+      } catch (e) {
+        json = null
       }
-      
-      const json = await response.json()
+
+      if (!response.ok) {
+        const errMsg = json?.error || json?.message || `HTTP error! status: ${response.status}`
+        throw new Error(errMsg)
+      }
 
       // Unwrap the backend envelope { data: ..., error: ... }
       // The demo control API does NOT use this envelope — skip unwrap for those
@@ -133,6 +140,14 @@ class ApiClient {
 
   async triggerDiagnosis(incidentId) {
     return this.post(API_ENDPOINTS.INCIDENT_DIAGNOSE(incidentId), {})
+  }
+
+  async getIncidentTrace(incidentId) {
+    return this.get(API_ENDPOINTS.INCIDENT_TRACE(incidentId))
+  }
+
+  async getIncidentTraceArtifact(incidentId, key) {
+    return this.get(API_ENDPOINTS.INCIDENT_TRACE_ARTIFACT(incidentId, key))
   }
 }
 

@@ -8,6 +8,7 @@ import argparse
 import datetime
 import json
 import logging
+import os
 import sys
 
 try:
@@ -27,7 +28,21 @@ def inject_misconfiguration(
     rule_name: str = "s3-bucket-level-public-access-prohibited",
 ) -> dict:
     env = environment
-    target_bucket = bucket_name or f"llm-incident-response-data-lake-{env}"
+    if not bucket_name:
+        if env != "dev":
+            account_id = "889081505756"
+            bucket_name = f"llm-incident-datalake-{account_id}-{env}"
+        else:
+            bucket_name = os.environ.get("DATA_LAKE_BUCKET")
+    if not bucket_name:
+        account_id = "889081505756"
+        if boto3 is not None and not dry_run:
+            try:
+                account_id = boto3.client("sts", region_name=region).get_caller_identity()["Account"]
+            except Exception:
+                pass
+        bucket_name = f"llm-incident-datalake-{account_id}-{env}"
+    target_bucket = bucket_name
     injected_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
     logger.info(f"Injecting misconfiguration fault: bucket={target_bucket}, rule={rule_name}, dry_run={dry_run}")

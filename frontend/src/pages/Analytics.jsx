@@ -77,14 +77,28 @@ export default function Analytics() {
     )
   }
 
-  // Derive chart data from incidents list
-  const summary = results?.summary || computeSummaryFromIncidents(incidents)
+  // Derive summary stats: normalize S3 summary.json keys if present, or fallback to computing from incidents list
+  const summary = results ? {
+    average_mttr_minutes: typeof results.mttr_seconds_avg === 'number'
+      ? Math.round(results.mttr_seconds_avg / 60)
+      : (results.average_mttr_minutes || 0),
+    diagnosis_accuracy: typeof results.rca_accuracy_pct === 'number'
+      ? Math.round(results.rca_accuracy_pct)
+      : (results.diagnosis_accuracy || 0),
+    verification_success_rate: typeof results.rca_accuracy_pct === 'number'
+      ? Math.round(results.rca_accuracy_pct)
+      : (results.verification_success_rate || 0),
+    diagnosis_recovery_gap: typeof results.diagnosis_recovery_gap_pct === 'number'
+      ? Math.round(results.diagnosis_recovery_gap_pct)
+      : (results.diagnosis_recovery_gap || 0),
+  } : computeSummaryFromIncidents(incidents)
+
   const mttrData = buildMTTRDistribution(incidents)
   const timelineData = buildTimelineData(incidents)
   const confidenceData = buildConfidenceData(incidents)
   const drGapData = buildDRGapData(incidents)
-  const failureTaxonomyData = buildFailureTaxonomyData(incidents)
-  const ragComparisonData = buildRAGComparisonData(incidents)
+  const failureTaxonomyData = buildFailureTaxonomyData(incidents, results)
+  const ragComparisonData = buildRAGComparisonData(incidents, results)
 
   return (
     <div className="space-y-6">
@@ -392,7 +406,12 @@ function buildDRGapData(incidents) {
   return Object.values(byClass)
 }
 
-function buildFailureTaxonomyData(incidents) {
+function buildFailureTaxonomyData(incidents, results) {
+  if (results?.failure_taxonomy && Object.keys(results.failure_taxonomy).length > 0) {
+    return Object.entries(results.failure_taxonomy)
+      .map(([mode, count]) => ({ mode: mode.replace(/_/g, ' '), count }))
+      .sort((a, b) => b.count - a.count)
+  }
   const counts = {}
 
   for (const inc of incidents) {
@@ -406,7 +425,22 @@ function buildFailureTaxonomyData(incidents) {
     .sort((a, b) => b.count - a.count)
 }
 
-function buildRAGComparisonData(incidents) {
+function buildRAGComparisonData(incidents, results) {
+  if (results?.rag_ablation_comparison) {
+    const rag = results.rag_ablation_comparison
+    return [
+      {
+        fault_class: 'With RAG',
+        rag: rag.used_rag_true?.accuracy_pct || 0,
+        no_rag: 0,
+      },
+      {
+        fault_class: 'Without RAG',
+        rag: 0,
+        no_rag: rag.used_rag_false?.accuracy_pct || 0,
+      }
+    ]
+  }
   const data = {}
 
   for (const inc of incidents) {

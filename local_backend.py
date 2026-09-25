@@ -40,11 +40,11 @@ logger = logging.getLogger("local_backend")
 # Must be set BEFORE importing Lambda handler modules so they pick up the
 # values at module load time.
 # ---------------------------------------------------------------------------
-os.environ.setdefault("INCIDENTS_TABLE", "incidents-staging")
-os.environ.setdefault("DATA_LAKE_BUCKET", "llm-incident-datalake-889081505756-staging")
+os.environ.setdefault("INCIDENTS_TABLE", "incidents-dev")
+os.environ.setdefault("DATA_LAKE_BUCKET", "llm-incident-datalake-889081505756-dev")
 os.environ.setdefault("AWS_DEFAULT_REGION", "ap-south-1")
 os.environ.setdefault("AWS_REGION", "ap-south-1")
-os.environ.setdefault("ENVIRONMENT", "staging")
+os.environ.setdefault("ENVIRONMENT", "dev")
 
 # Inter-Lambda "function names" - used by the LocalLambdaRouter below.
 # We set them to well-known sentinel strings that the router recognises.

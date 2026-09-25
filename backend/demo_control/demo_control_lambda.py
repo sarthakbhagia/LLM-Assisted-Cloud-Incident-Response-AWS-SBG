@@ -32,7 +32,7 @@ _s3 = boto3.client("s3")
 _dynamodb = boto3.resource("dynamodb")
 
 # Config from environment
-ENVIRONMENT = os.environ.get("ENVIRONMENT", "staging")
+ENVIRONMENT = os.environ.get("ENVIRONMENT", "dev")
 INCIDENTS_TABLE = os.environ.get("INCIDENTS_TABLE", "")
 APPROVAL_FUNCTION_NAME = os.environ.get("APPROVAL_FUNCTION_NAME", "")
 DATA_LAKE_BUCKET = os.environ.get("DATA_LAKE_BUCKET", "")
@@ -78,19 +78,20 @@ def _err(message: str, status: int = 400) -> dict:
 
 def _rate_limit_check() -> tuple[bool, str | None]:
     """Check if a demo is already active. Returns (allowed, incident_id)."""
-    # Clean up completed incidents and stale pending entries
     current_time = datetime.now(timezone.utc)
     for inc_id, info in list(_active_demo_incidents.items()):
-        if info.get("status") in ("completed", "failed"):
+        if info.get("status") in ("completed", "failed", "resolved", "approved"):
             del _active_demo_incidents[inc_id]
         elif info.get("status") == "injected":
-            # Check if the injection is stale (> 2 minutes)
-            injected_at = datetime.fromisoformat(info.get("started_at", "").replace("Z", "+00:00"))
-            if (current_time - injected_at).total_seconds() > 120:
+            # Check if the injection is stale (> 30 seconds)
+            try:
+                injected_at = datetime.fromisoformat(info.get("started_at", "").replace("Z", "+00:00"))
+                if (current_time - injected_at).total_seconds() > 30:
+                    del _active_demo_incidents[inc_id]
+            except Exception:
                 del _active_demo_incidents[inc_id]
 
     if _active_demo_incidents:
-        # Return the active incident ID so UI can show it
         active_id = next(iter(_active_demo_incidents))
         return False, active_id
     return True, None
