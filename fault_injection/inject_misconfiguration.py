@@ -30,17 +30,18 @@ def inject_misconfiguration(
     env = environment
     if not bucket_name:
         if env != "dev":
-            account_id = "889081505756"
+            try:
+                account_id = boto3.client("sts", region_name=region).get_caller_identity()["Account"]
+            except Exception:
+                account_id = "123456789012"
             bucket_name = f"llm-incident-datalake-{account_id}-{env}"
         else:
             bucket_name = os.environ.get("DATA_LAKE_BUCKET")
     if not bucket_name:
-        account_id = "889081505756"
-        if boto3 is not None and not dry_run:
-            try:
-                account_id = boto3.client("sts", region_name=region).get_caller_identity()["Account"]
-            except Exception:
-                pass
+        try:
+            account_id = boto3.client("sts", region_name=region).get_caller_identity()["Account"]
+        except Exception:
+            account_id = "123456789012"
         bucket_name = f"llm-incident-datalake-{account_id}-{env}"
     target_bucket = bucket_name
     injected_at = datetime.datetime.now(datetime.timezone.utc).isoformat()

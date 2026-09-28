@@ -288,13 +288,19 @@ Resources:
                 Resource: !Sub "${IncidentDataLake.Arn}/incidents/*"
               - Effect: Allow
                 Action:
-                  - s3:PutPublicAccessBlock
-                Resource: !GetAtt IncidentDataLake.Arn
+                  - s3:PutBucketPublicAccessBlock
+                Resource: '*'
               - Effect: Allow
                 Action:
                   - cloudwatch:GetMetricStatistics
                   - cloudwatch:GetMetricData
+                  - cloudwatch:DescribeAlarms
                   - config:GetComplianceDetailsByConfigRule
+                  - config:StartConfigRulesEvaluation
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - s3:GetPublicAccessBlock
                 Resource: '*'
         - PolicyName: remediation-lambda-actions
           PolicyDocument:
@@ -305,6 +311,7 @@ Resources:
                 Action:
                   - lambda:GetFunctionConcurrency
                   - lambda:PutFunctionConcurrency
+                  - lambda:DeleteFunctionConcurrency
                   - lambda:ListFunctions
                 Resource: '*'
               # restart_service / restart_downstream_service - bump env var
@@ -325,6 +332,7 @@ Resources:
                   - iam:PutRolePolicy
                   - iam:DeleteRolePolicy
                   - iam:ListRolePolicies
+                  - iam:ListRoles
                 Resource: '*'
         - PolicyName: invoke-verification-lambda
           PolicyDocument:
@@ -768,6 +776,7 @@ Resources:
               - Effect: Allow
                 Action:
                   - dynamodb:GetItem
+                  - dynamodb:UpdateItem
                 Resource: !GetAtt IncidentsTable.Arn
         - PolicyName: raw-evidence-read
           PolicyDocument:
@@ -1163,6 +1172,8 @@ Outputs:
   CollectorFunctionArn:
     Description: ARN of the Phase 3 collector Lambda
     Value: !GetAtt CollectorFunction.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-CollectorFunctionArn"
 
   DiagnosisFunctionArn:
     Description: ARN of the Phase 4 diagnosis Lambda (stub until Phase 4)

@@ -41,10 +41,17 @@ logger = logging.getLogger("local_backend")
 # values at module load time.
 # ---------------------------------------------------------------------------
 os.environ.setdefault("INCIDENTS_TABLE", "incidents-dev")
-os.environ.setdefault("DATA_LAKE_BUCKET", "llm-incident-datalake-889081505756-dev")
 os.environ.setdefault("AWS_DEFAULT_REGION", "ap-south-1")
 os.environ.setdefault("AWS_REGION", "ap-south-1")
 os.environ.setdefault("ENVIRONMENT", "dev")
+
+try:
+    _sts = boto3.client("sts", region_name="ap-south-1")
+    _account_id = _sts.get_caller_identity()["Account"]
+except Exception:
+    _account_id = "889081505756"
+
+os.environ.setdefault("DATA_LAKE_BUCKET", f"llm-incident-datalake-{_account_id}-dev")
 
 # Inter-Lambda "function names" - used by the LocalLambdaRouter below.
 # We set them to well-known sentinel strings that the router recognises.
@@ -53,6 +60,10 @@ os.environ.setdefault("NOTIFY_FUNCTION_NAME", "LOCAL::notify")
 os.environ.setdefault("REMEDIATION_FUNCTION_NAME", "LOCAL::remediation")
 os.environ.setdefault("VERIFICATION_FUNCTION_NAME", "LOCAL::verification")
 os.environ.setdefault("APPROVAL_FUNCTION_NAME", "LOCAL::approval")
+# Routes demo fault injection directly to the in-process collector.
+# In local mode there is no EventBridge -> Lambda trigger, so the demo
+# handler must invoke the collector itself for all fault types.
+os.environ.setdefault("COLLECTOR_FUNCTION_NAME", "LOCAL::collector")
 
 # Skip HMAC token check in approval handler by leaving the SSM path empty.
 # The local approve route bypasses the approval handler entirely and writes
@@ -761,6 +772,66 @@ def health_aws():
     except Exception as exc:
         traceback.print_exc()
         return _json_resp(error=str(exc), status=500)
+
+
+@main_app.route("/api/health", methods=["GET", "OPTIONS"])
+def api_health():
+    """
+    /api/health - alias consumed by the frontend SystemHealth page.
+    The Vite proxy routes /api/* to port 3001, so this must live on the
+    main app (not the demo app). Runs the same deep AWS health checks as
+    /health/aws so the SystemHealth dashboard gets real per-service status.
+    """
+    if request.method == "OPTIONS":
+        return cors_preflight()
+    try:
+        result = _run_aws_health_checks()
+        status_code = 200 if result["overall"] == "ok" else 503
+        resp = jsonify(result)
+        resp.status_code = status_code
+        for k, v in CORS_HEADERS.items():
+            resp.headers[k] = v
+        return resp
+    except Exception as exc:
+        traceback.print_exc()
+        return _json_resp(error=str(exc), status=500)
+
+
+@main_app.route("/api/services", methods=["GET", "OPTIONS"])
+def api_services():
+    """
+    /api/services - returns static service topology used by ServiceMap.
+    In production this would be populated from live Lambda/ECS discovery;
+    locally we return the known three-service architecture so the frontend
+    stops logging 404 errors on every poll interval.
+    """
+    if request.method == "OPTIONS":
+        return cors_preflight()
+    env = os.environ.get("ENVIRONMENT", "dev")
+    services = [
+        {
+            "id": "service-a",
+            "label": "Service A",
+            "description": "Entry point Lambda",
+            "function_name": f"service-a-{env}",
+            "outputs": ["service-b"],
+        },
+        {
+            "id": "service-b",
+            "label": "Service B",
+            "description": "Processing Lambda",
+            "function_name": f"service-b-{env}",
+            "outputs": ["service-c"],
+        },
+        {
+            "id": "service-c",
+            "label": "Service C",
+            "description": "Downstream Lambda",
+            "function_name": f"service-c-{env}",
+            "outputs": [],
+        },
+    ]
+    return _json_resp(data={"services": services})
 
 
 

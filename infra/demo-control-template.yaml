@@ -53,6 +53,15 @@ Resources:
                 Action:
                   - config:StartConfigRulesEvaluation
                 Resource: '*'
+        - PolicyName: demo-invoke-collector
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource:
+                  - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:*CollectorFunction*"
         - PolicyName: demo-ssm-secret
           PolicyDocument:
             Version: '2012-10-17'
@@ -88,6 +97,8 @@ Resources:
             Fn::ImportValue: !Sub "${MainStackName}-IncidentsTableName"
           APPROVAL_FUNCTION_NAME:
             Fn::ImportValue: !Sub "${MainStackName}-ApprovalFunctionArn"
+          COLLECTOR_FUNCTION_NAME:
+            Fn::ImportValue: !Sub "${MainStackName}-CollectorFunctionArn"
           DATA_LAKE_BUCKET:
             Fn::ImportValue: !Sub "${MainStackName}-IncidentDataLakeName"
       Events:
