@@ -158,13 +158,21 @@ def _recheck_resource_exhaustion(signal: dict) -> tuple[str, str, str]:
         return ("inconclusive", signal_desc, f"CloudWatch GetMetricStatistics error: {exc}")
 
     if not datapoints:
+        # No recent invocations - fall back to checking the CloudWatch alarm state.
+        # This covers the demo scenario where the alarm was artificially set via
+        # SetAlarmState (no real Lambda invocations, so no Duration datapoints exist).
+        # The alarm returning to OK is the most direct resolution signal available.
+        if alarm_name:
+            alarm_status, alarm_notes = _get_alarm_state(alarm_name)
+            fallback_desc = f"CloudWatch alarm state for '{alarm_name}' (no recent Lambda invocations)"
+            return (alarm_status, fallback_desc, alarm_notes)
         return (
             "inconclusive",
             signal_desc,
             (
                 f"No {metric_name} datapoints returned for '{function_name}' "
-                f"in the last {METRIC_LOOKBACK_SECONDS}s. Function may not have been invoked "
-                "since remediation, or metrics have not yet populated."
+                f"in the last {METRIC_LOOKBACK_SECONDS}s and no alarm name available to check state. "
+                "Function may not have been invoked since remediation."
             ),
         )
 
@@ -224,6 +232,159 @@ def _get_lambda_metric_datapoints(function_name: str, metric_name: str, stat: st
     ]
 
 
+def _get_alarm_state(alarm_name: str) -> tuple[str, str]:
+    """
+    Fetch the current state of a CloudWatch alarm and map it to a
+    verification outcome.
+
+    Returns (status, notes) where status is one of:
+      "resolved"     - alarm state is OK (signal has returned to normal)
+      "not_resolved" - alarm state is still ALARM
+      "inconclusive" - INSUFFICIENT_DATA or DescribeAlarms error
+
+    This is the fallback for demo scenarios where the alarm was triggered
+    via SetAlarmState (no real Lambda invocations, so no metric datapoints).
+    The alarm returning to OK is the most direct resolution signal available.
+    """
+    try:
+        resp = _cw.describe_alarms(AlarmNames=[alarm_name], AlarmTypes=["MetricAlarm"])
+        alarms = resp.get("MetricAlarms", [])
+        if not alarms:
+            return (
+                "inconclusive",
+                f"Alarm '{alarm_name}' not found via DescribeAlarms. Cannot determine resolution state.",
+            )
+        state = alarms[0].get("StateValue", "INSUFFICIENT_DATA")
+        state_reason = alarms[0].get("StateReason", "")
+        if state == "OK":
+            return (
+                "resolved",
+                f"CloudWatch alarm '{alarm_name}' returned to OK state. {state_reason}",
+            )
+        if state == "ALARM":
+            return (
+                "not_resolved",
+                f"CloudWatch alarm '{alarm_name}' is still in ALARM state. {state_reason}",
+            )
+        # INSUFFICIENT_DATA
+        return (
+            "inconclusive",
+            f"CloudWatch alarm '{alarm_name}' is in INSUFFICIENT_DATA state. {state_reason}",
+        )
+    except ClientError as exc:
+        return (
+            "inconclusive",
+            f"DescribeAlarms error for '{alarm_name}': {exc}",
+        )
+
+
+def _get_alarm_state_composite(alarm_name: str) -> tuple[str, str]:
+    """
+    Like _get_alarm_state but checks CompositeAlarm type.
+    Used as fallback for service_cascade when no metric datapoints exist.
+
+    Returns (status, notes):
+      "resolved"     - composite alarm is OK
+      "not_resolved" - composite alarm is still ALARM
+      "inconclusive" - INSUFFICIENT_DATA or API error
+    """
+    try:
+        resp = _cw.describe_alarms(AlarmNames=[alarm_name], AlarmTypes=["CompositeAlarm"])
+        alarms = resp.get("CompositeAlarms", [])
+        if not alarms:
+            return (
+                "inconclusive",
+                f"Composite alarm '{alarm_name}' not found via DescribeAlarms. Cannot determine resolution state.",
+            )
+        state = alarms[0].get("StateValue", "INSUFFICIENT_DATA")
+        state_reason = alarms[0].get("StateReason", "")
+        if state == "OK":
+            return (
+                "resolved",
+                f"Composite alarm '{alarm_name}' returned to OK state. {state_reason}",
+            )
+        if state == "ALARM":
+            return (
+                "not_resolved",
+                f"Composite alarm '{alarm_name}' is still in ALARM state. {state_reason}",
+            )
+        return (
+            "inconclusive",
+            f"Composite alarm '{alarm_name}' is in INSUFFICIENT_DATA state. {state_reason}",
+        )
+    except ClientError as exc:
+        return (
+            "inconclusive",
+            f"DescribeAlarms (composite) error for '{alarm_name}': {exc}",
+        )
+
+
+def _check_s3_public_access_block(bucket_names: list[str]) -> tuple[str, str] | None:
+    """
+    Directly check whether S3 public access block is fully enabled for the
+    given bucket names. Used as a fallback for misconfiguration verification
+    when AWS Config has not re-evaluated since the lock_s3_bucket remediation.
+
+    Returns (status, notes) if any bucket could be checked, else None.
+    - "resolved"     - all checked buckets have full public access block enabled
+    - "not_resolved" - at least one bucket still has public access enabled
+    - None           - could not check any buckets (no valid bucket names)
+    """
+    _s3 = boto3.client("s3")
+    results = []
+    for bucket in bucket_names:
+        if not bucket or bucket == "unknown":
+            continue
+        try:
+            resp = _s3.get_public_access_block(Bucket=bucket)
+            cfg = resp.get("PublicAccessBlockConfiguration", {})
+            fully_blocked = all([
+                cfg.get("BlockPublicAcls", False),
+                cfg.get("IgnorePublicAcls", False),
+                cfg.get("BlockPublicPolicy", False),
+                cfg.get("RestrictPublicBuckets", False),
+            ])
+            results.append((bucket, fully_blocked))
+            logger.info(json.dumps({
+                "event": "s3_public_access_check",
+                "bucket": bucket,
+                "fully_blocked": fully_blocked,
+                "config": cfg,
+            }))
+        except ClientError as exc:
+            error_code = exc.response.get("Error", {}).get("Code", "")
+            if error_code == "NoSuchPublicAccessBlockConfiguration":
+                # No block config set at all - bucket is publicly accessible
+                results.append((bucket, False))
+            else:
+                logger.warning(json.dumps({
+                    "event": "s3_public_access_check_error",
+                    "bucket": bucket,
+                    "error": str(exc),
+                }))
+
+    if not results:
+        return None
+
+    unblocked = [b for b, blocked in results if not blocked]
+    if unblocked:
+        return (
+            "not_resolved",
+            (
+                f"S3 public access block not fully enabled on: {', '.join(unblocked)}. "
+                "lock_s3_bucket remediation may not have applied yet, or failed."
+            ),
+        )
+    checked = [b for b, _ in results]
+    return (
+        "resolved",
+        (
+            f"S3 public access block fully enabled on: {', '.join(checked)}. "
+            "Bucket is no longer publicly accessible - incident resolved."
+        ),
+    )
+
+
 # ===========================================================================
 # misconfiguration: re-check Config rule compliance
 # ===========================================================================
@@ -233,6 +394,13 @@ def _recheck_misconfiguration(signal: dict) -> tuple[str, str, str]:
     Re-check the Config rule compliance status for the flagged resource.
     If 0 NON_COMPLIANT results are returned for the rule (optionally filtered
     to the specific resource), the incident is considered resolved.
+
+    Improvements over the original:
+    1. Force a fresh Config evaluation before querying results, so the check
+       reflects the post-remediation state rather than the pre-remediation cache.
+    2. If the Config API still shows NON_COMPLIANT results (evaluation lag),
+       fall back to checking the S3 public access block status directly (since
+       the only misconfiguration fault class in this demo is an S3 public bucket).
     """
     config_rule = (signal.get("config_rule") or "").strip()
     resource_type = signal.get("resource_type")
@@ -248,6 +416,24 @@ def _recheck_misconfiguration(signal: dict) -> tuple[str, str, str]:
     signal_desc = f"Config rule '{config_rule}' NON_COMPLIANT count"
     if resource_id:
         signal_desc += f" for resource '{resource_id}'"
+
+    # Force a fresh evaluation so we see post-remediation state.
+    # StartConfigRulesEvaluation is async - results may not be ready immediately,
+    # but it re-queues the evaluation so the next check will be accurate.
+    try:
+        _config_client.start_config_rules_evaluation(ConfigRuleNames=[config_rule])
+        logger.info(json.dumps({
+            "event": "config_evaluation_triggered",
+            "config_rule": config_rule,
+            "note": "Forced fresh evaluation before compliance check",
+        }))
+    except ClientError as exc:
+        # Non-fatal: evaluation may already be running. Continue to compliance check.
+        logger.warning(json.dumps({
+            "event": "config_evaluation_trigger_failed",
+            "config_rule": config_rule,
+            "error": str(exc),
+        }))
 
     try:
         kwargs: dict = {
@@ -281,12 +467,25 @@ def _recheck_misconfiguration(signal: dict) -> tuple[str, str, str]:
          .get("ResourceId", "unknown"))
         for e in non_compliant_items
     ]
+
+    # Config still shows NON_COMPLIANT - it may not have re-evaluated yet after
+    # the lock_s3_bucket remediation. Fall back to directly checking the S3 public
+    # access block for each non-compliant bucket resource.
+    s3_check_result = _check_s3_public_access_block(resource_list)
+    if s3_check_result is not None:
+        status, s3_notes = s3_check_result
+        return (
+            status,
+            f"S3 public access block (Config eval lag fallback for '{config_rule}')",
+            s3_notes,
+        )
+
     return (
         "not_resolved",
         signal_desc,
         (
             f"Config rule '{config_rule}' still has {len(non_compliant_items)} NON_COMPLIANT "
-            f"resource(s): {', '.join(resource_list)}."
+            f"resource(s): {', '.join(resource_list)}. Config may not have re-evaluated yet."
         ),
     )
 
@@ -302,9 +501,16 @@ def _recheck_service_cascade(signal: dict) -> tuple[str, str, str]:
     - Service C: Duration average <= latency_threshold
 
     Both must be below threshold for the incident to be "resolved".
+
+    Fallback: if neither service has recent metric datapoints (demo scenario
+    where the composite alarm was triggered via SetAlarmState without real
+    traffic), fall back to checking the composite alarm state directly.
+    This prevents a false "resolved" from 0-defaulted metrics while the
+    composite alarm may still be in ALARM state.
     """
     error_threshold = signal.get("service_a_error_threshold", 5)
     latency_threshold = signal.get("service_c_latency_threshold", 3000)
+    alarm_name = signal.get("alarm_name") or ""
 
     service_a_name = _find_lambda_by_prefix("ServiceA")
     service_c_name = _find_lambda_by_prefix("ServiceC")
@@ -330,6 +536,25 @@ def _recheck_service_cascade(signal: dict) -> tuple[str, str, str]:
         c_latency_data = _get_lambda_metric_datapoints(service_c_name, "Duration", "Average")
     except ClientError as exc:
         return ("inconclusive", signal_desc, f"CloudWatch GetMetricStatistics error: {exc}")
+
+    # No datapoints for EITHER service - this is the demo scenario (SetAlarmState,
+    # no real traffic). Defaulting to 0 would always return "resolved" which is a
+    # false positive if the composite alarm is still in ALARM state.
+    # Fall back to the composite alarm state as the authoritative signal.
+    if not a_errors_data and not c_latency_data:
+        if alarm_name:
+            alarm_status, alarm_notes = _get_alarm_state_composite(alarm_name)
+            fallback_desc = f"Composite alarm state for '{alarm_name}' (no recent Lambda invocations)"
+            return (alarm_status, fallback_desc, alarm_notes)
+        return (
+            "inconclusive",
+            signal_desc,
+            (
+                "No metric datapoints for ServiceA or ServiceC in the last "
+                f"{METRIC_LOOKBACK_SECONDS}s and no composite alarm name to check. "
+                "Services may not have been invoked since remediation."
+            ),
+        )
 
     a_max_errors = max((dp["value"] for dp in a_errors_data), default=0)
     c_max_latency = max((dp["value"] for dp in c_latency_data), default=0)

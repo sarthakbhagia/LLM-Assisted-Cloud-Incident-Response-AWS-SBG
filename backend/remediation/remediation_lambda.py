@@ -241,14 +241,15 @@ def _build_original_signal(record: dict) -> dict:
         )
 
     elif fault_class == "misconfiguration":
-        # The collector stores the parsed event; try to extract config_rule from it.
-        # The raw_data detection_event field is not in DynamoDB - we use resource_id
-        # as the config_rule name fallback (the collector populates resource_id from config_rule
-        # for misconfiguration events from Config).
+        # Prefer the config_rule field stored by the collector (the actual rule name).
+        # Fall back to resource_id only for legacy records that pre-date this field.
+        stored_config_rule = record.get("config_rule") or resource_id
         diagnosis = record.get("diagnosis") or {}
         affected = diagnosis.get("affected_resources") or []
-        signal["config_rule"] = resource_id  # alarm_name / resource_id for Config events IS the rule name
+        signal["config_rule"] = stored_config_rule
+        signal["resource_id"] = resource_id   # bucket name - used by the S3 direct-check fallback
         signal["resource_type"] = affected[0] if affected else None
+
 
     elif fault_class == "service_cascade":
         signal["alarm_name"] = resource_id

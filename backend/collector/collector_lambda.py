@@ -306,22 +306,16 @@ def _infer_function_name_from_alarm(alarm_name: str) -> str | None:
 
 
 def _resolve_lambda_name(service_prefix: str) -> str | None:
-    """
-    List Lambda functions and return the one matching our service prefix.
-    Uses the SAM naming convention: <stack>-<service>Function-<suffix>
-
-    Bug fix: previously created a fresh boto3.client("lambda") on every call,
-    ignoring the module-level _lambda client defined at line 39. The fresh client
-    had a different session context and its errors were caught silently by the
-    except ClientError, causing logs/metrics to be silently empty. Now uses the
-    same module-level _lambda client that all other Lambda API calls use.
-    """
     try:
         paginator = _lambda.get_paginator("list_functions")
         for page in paginator.paginate():
             for fn in page["Functions"]:
                 name = fn["FunctionName"]
                 if service_prefix.lower() in name.lower():
+                    # If we are in dev (indicated by incidents-dev table), skip staging functions
+                    incidents_table = os.environ.get("INCIDENTS_TABLE", "")
+                    if "dev" in incidents_table and "staging" in name.lower():
+                        continue
                     return name
     except ClientError as exc:
         logger.warning(json.dumps({"event": "resolve_lambda_error", "service_prefix": service_prefix, "error": str(exc)}, default=str))
@@ -692,6 +686,10 @@ def _write_incident_record(
         # Metadata for query convenience
         "detection_source": parsed.get("source", "unknown"),
         "resource_id": parsed.get("resource_id"),
+        # For misconfiguration faults: the Config rule name that triggered the event.
+        # Stored here so remediation_lambda can pass the correct rule name to verification
+        # without needing to re-derive it from resource_id (which is the bucket name).
+        "config_rule": parsed.get("config_rule"),
     }
     try:
         table.put_item(Item=item)

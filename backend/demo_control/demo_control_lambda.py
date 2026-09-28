@@ -41,12 +41,23 @@ DATA_LAKE_BUCKET = os.environ.get("DATA_LAKE_BUCKET", "")
 # For production, use DynamoDB TTL or ElastiCache
 _active_demo_incidents: dict = {}
 
-# Fault class mapping to alarm names
+# Fault class mapping to alarm names.
+# For service_cascade we must set the two COMPONENT metric alarms, not the
+# composite alarm. CloudWatch SetAlarmState on a composite alarm does NOT
+# generate an EventBridge event, so the collector would never fire.
 FAULT_CLASS_ALARMS = {
     "resource_exhaustion": f"incident-service-a-resource-exhaustion-{ENVIRONMENT}",
     "misconfiguration": f"incident-public-s3-{ENVIRONMENT}",  # Config rule name
-    "service_cascade": f"incident-service-cascade-{ENVIRONMENT}",
+    "service_cascade": f"incident-service-cascade-{ENVIRONMENT}",  # composite - see _inject_fault
 }
+
+# The two component metric alarms that drive the composite cascade alarm.
+# Setting BOTH to ALARM causes the composite to transition to ALARM naturally,
+# which DOES produce an EventBridge event that fires the CollectorFunction.
+SERVICE_CASCADE_COMPONENT_ALARMS = [
+    f"incident-service-a-errors-{ENVIRONMENT}",
+    f"incident-service-c-latency-{ENVIRONMENT}",
+]
 
 # Valid fault classes
 VALID_FAULT_CLASSES = {"resource_exhaustion", "misconfiguration", "service_cascade"}
@@ -83,10 +94,12 @@ def _rate_limit_check() -> tuple[bool, str | None]:
         if info.get("status") in ("completed", "failed", "resolved", "approved"):
             del _active_demo_incidents[inc_id]
         elif info.get("status") == "injected":
-            # Check if the injection is stale (> 30 seconds)
+            # Check if the injection is stale (> 90 seconds).
+            # The full pipeline (alarm -> EventBridge -> collector -> diagnosis) can take
+            # up to 60-90s, so 30s was too short and caused false rate-limit blocks.
             try:
                 injected_at = datetime.fromisoformat(info.get("started_at", "").replace("Z", "+00:00"))
-                if (current_time - injected_at).total_seconds() > 30:
+                if (current_time - injected_at).total_seconds() > 90:
                     del _active_demo_incidents[inc_id]
             except Exception:
                 del _active_demo_incidents[inc_id]
@@ -98,37 +111,144 @@ def _rate_limit_check() -> tuple[bool, str | None]:
 
 
 def _inject_fault(fault_class: str) -> dict:
-    """Trigger a fault by setting CloudWatch alarm state or Config evaluation."""
-    alarm_name = FAULT_CLASS_ALARMS.get(fault_class)
-    if not alarm_name:
-        return {"success": False, "error": f"Unknown fault_class: {fault_class}"}
+    """
+    Trigger a fault by the method appropriate for each fault class.
 
+    resource_exhaustion:
+        SetAlarmState on the metric alarm. The alarm state change generates
+        an EventBridge event that triggers the CollectorFunction.
+
+    service_cascade:
+        Set BOTH component metric alarms (service-a-errors and service-c-latency)
+        to ALARM. The composite alarm then transitions to ALARM naturally, which
+        DOES generate an EventBridge event (unlike calling SetAlarmState directly
+        on a composite alarm, which does NOT fire EventBridge).
+
+    misconfiguration:
+        Directly invoke the CollectorFunction with a pre-built payload.
+        start_config_rules_evaluation is async and unreliable for demos -
+        it only fires an event when Config finds a NON_COMPLIANT resource,
+        which depends on whether a non-compliant resource actually exists.
+    """
     try:
-        if fault_class in ("resource_exhaustion", "service_cascade"):
-            # Set CloudWatch alarm to ALARM state
+        if fault_class == "resource_exhaustion":
+            alarm_name = FAULT_CLASS_ALARMS["resource_exhaustion"]
             _cloudwatch.set_alarm_state(
                 AlarmName=alarm_name,
                 StateValue="ALARM",
-                StateReason=f"Demo Mode: Injected {fault_class} fault",
+                StateReason="Demo Mode: Injected resource_exhaustion fault",
                 StateReasonData=json.dumps({
                     "injected_by": "demo_mode",
                     "fault_class": fault_class,
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 }),
             )
-            return {"success": True, "method": "cloudwatch_alarm", "alarm_name": alarm_name}
+            result = {"success": True, "method": "cloudwatch_alarm", "alarm_name": alarm_name}
+
+            # In local mode EventBridge does not forward the alarm state change
+            # to the collector, so we invoke it directly.
+            collector_fn = os.environ.get("COLLECTOR_FUNCTION_NAME", "")
+            if collector_fn:
+                synthetic_event = {
+                    "source": "aws.cloudwatch",
+                    "fault_class": "resource_exhaustion",
+                    "alarm_name": alarm_name,
+                    "resource_id": alarm_name,
+                    "injected_by": "demo_mode",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+                _lambda.invoke(
+                    FunctionName=collector_fn,
+                    InvocationType="Event",
+                    Payload=json.dumps(synthetic_event),
+                )
+                result["collector_invoked"] = True
+            return result
+
+        elif fault_class == "service_cascade":
+            # Set BOTH component metric alarms. The composite alarm will
+            # transition to ALARM automatically and generate the EventBridge event.
+            reason_data = json.dumps({
+                "injected_by": "demo_mode",
+                "fault_class": fault_class,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+            set_alarms = []
+            for component_alarm in SERVICE_CASCADE_COMPONENT_ALARMS:
+                _cloudwatch.set_alarm_state(
+                    AlarmName=component_alarm,
+                    StateValue="ALARM",
+                    StateReason="Demo Mode: Injected service_cascade fault (component alarm)",
+                    StateReasonData=reason_data,
+                )
+                set_alarms.append(component_alarm)
+            result = {
+                "success": True,
+                "method": "cloudwatch_component_alarms",
+                "component_alarms_set": set_alarms,
+                "composite_alarm": FAULT_CLASS_ALARMS["service_cascade"],
+                "note": "Component metric alarms set to ALARM. Composite alarm will transition automatically.",
+            }
+
+            # In local mode EventBridge does not forward the composite alarm
+            # transition to the collector, so we invoke it directly.
+            collector_fn = os.environ.get("COLLECTOR_FUNCTION_NAME", "")
+            if collector_fn:
+                composite_alarm = FAULT_CLASS_ALARMS["service_cascade"]
+                synthetic_event = {
+                    "source": "aws.cloudwatch",
+                    "fault_class": "service_cascade",
+                    "alarm_name": composite_alarm,
+                    "resource_id": composite_alarm,
+                    "injected_by": "demo_mode",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+                _lambda.invoke(
+                    FunctionName=collector_fn,
+                    InvocationType="Event",
+                    Payload=json.dumps(synthetic_event),
+                )
+                result["collector_invoked"] = True
+            return result
 
         elif fault_class == "misconfiguration":
-            # Trigger Config rule evaluation
-            config_client = boto3.client("config")
-            config_client.start_config_rules_evaluation(ConfigRuleNames=[alarm_name])
-            return {"success": True, "method": "config_evaluation", "config_rule": alarm_name}
+            # Directly invoke the collector with a synthetic Config-style event.
+            # This bypasses the async Config evaluation loop and makes the demo
+            # reliable regardless of whether non-compliant resources exist.
+            collector_fn = os.environ.get("COLLECTOR_FUNCTION_NAME", "")
+            if not collector_fn:
+                # Fallback: try Config evaluation (original behaviour)
+                config_client = boto3.client("config")
+                config_rule = FAULT_CLASS_ALARMS["misconfiguration"]
+                config_client.start_config_rules_evaluation(ConfigRuleNames=[config_rule])
+                return {"success": True, "method": "config_evaluation", "config_rule": config_rule,
+                        "warning": "COLLECTOR_FUNCTION_NAME not set - fell back to config evaluation"}
+
+            synthetic_event = {
+                "source": "aws_config",
+                "fault_class": "misconfiguration",
+                "config_rule": FAULT_CLASS_ALARMS["misconfiguration"],
+                "resource_id": os.environ.get("DATA_LAKE_BUCKET") or FAULT_CLASS_ALARMS["misconfiguration"],
+                "resource_type": "AWS::S3::Bucket",
+                "injected_by": "demo_mode",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+            _lambda.invoke(
+                FunctionName=collector_fn,
+                InvocationType="Event",  # async - fire and forget
+                Payload=json.dumps(synthetic_event),
+            )
+            return {
+                "success": True,
+                "method": "direct_collector_invoke",
+                "config_rule": FAULT_CLASS_ALARMS["misconfiguration"],
+            }
 
     except ClientError as exc:
         logger.error(f"Fault injection failed: {exc}")
         return {"success": False, "error": str(exc)}
 
-    return {"success": False, "error": "No injection method available"}
+    return {"success": False, "error": f"Unknown fault_class: {fault_class}"}
 
 
 def _approve_incident(incident_id: str) -> dict:
