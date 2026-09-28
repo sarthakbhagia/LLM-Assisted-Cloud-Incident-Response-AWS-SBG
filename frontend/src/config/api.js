@@ -4,8 +4,11 @@
 // In production: set VITE_API_BASE_URL to your API Gateway Prod stage URL, e.g.:
 //   VITE_API_BASE_URL=https://o212lf1md4.execute-api.ap-south-1.amazonaws.com/Prod
 //   VITE_DEMO_API_BASE_URL=https://0l32vjl4n8.execute-api.ap-south-1.amazonaws.com/Prod
-export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'https://5guo2bztz5.execute-api.ap-south-1.amazonaws.com/Prod'
-export const DEMO_API_BASE_URL = import.meta.env.VITE_DEMO_API_BASE_URL || 'https://0l32vjl4n8.execute-api.ap-south-1.amazonaws.com/Prod'
+// Local dev: leave VITE_API_BASE_URL unset. Empty string means relative URLs,
+// which Vite's dev server proxy routes to localhost:3001 (see vite.config.js).
+// Production: set VITE_API_BASE_URL=https://<api-id>.execute-api.<region>.amazonaws.com/Prod
+export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || ''
+export const DEMO_API_BASE_URL = import.meta.env.VITE_DEMO_API_BASE_URL || ''
 
 export const API_ENDPOINTS = {
   INCIDENTS: '/api/incidents',

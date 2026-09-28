@@ -695,7 +695,7 @@ function EvidenceExplorer({ rawData, faultClass, activeTab, onTabChange }) {
   }
   if (faultClass === 'misconfiguration') {
     tabs.unshift('config')
-    if (rawData?.evidence?.guardduty_finding) tabs.splice(1, 0, 'guardduty')
+    if (rawData?.evidence?.evidence?.guardduty_finding) tabs.splice(1, 0, 'guardduty')
     tabs.unshift('logs')
   }
 
@@ -709,13 +709,13 @@ function EvidenceExplorer({ rawData, faultClass, activeTab, onTabChange }) {
       </div>
 
       {/* SE-5: Show warning when function name resolution failed and logs/metrics are missing */}
-      {rawData?.evidence?.evidence_collection_partial && (
+      {rawData?.evidence?.evidence?.evidence_collection_partial && (
         <div className="mb-4 p-3 bg-amber-surface border border-amber/30 rounded-card flex items-start space-x-2">
           <AlertTriangle className="w-4 h-4 text-amber flex-shrink-0 mt-0.5" />
           <div>
             <p className="text-xs text-amber font-medium">Partial Evidence Collection</p>
             <p className="text-xs text-text-secondary mt-0.5">
-              {rawData.evidence.evidence_collection_reason || 'Lambda function name could not be resolved. Logs and Metrics are unavailable. Use Raw Json tab to inspect full evidence.'}
+              {rawData?.evidence?.evidence?.evidence_collection_reason || 'Lambda function name could not be resolved. Logs and Metrics are unavailable. Use Raw Json tab to inspect full evidence.'}
             </p>
           </div>
         </div>
@@ -758,7 +758,10 @@ function EvidenceTabContent({ tab, data, faultClass }) {
     )
   }
 
-  const evidence = data.evidence || {}
+  // API response shape: data = { incident_id, fault_class, s3_key, evidence: { ..., evidence: { metrics, logs_insights, ... } } }
+  // The outer data.evidence holds metadata; the inner data.evidence.evidence holds the actual telemetry.
+  const outerEvidence = data.evidence || {}
+  const evidence = outerEvidence.evidence || outerEvidence
 
   switch (tab) {
     case 'raw json':
@@ -770,7 +773,7 @@ function EvidenceTabContent({ tab, data, faultClass }) {
 
     case 'metrics': {
       // Backend collector writes evidence.metrics with keys: duration, errors, throttles, invocations
-      const metricsObj = evidence.metrics || data.metrics || {}
+      const metricsObj = evidence.metrics || {}
       const metricNames = Object.keys(metricsObj).filter(k => Array.isArray(metricsObj[k]))
       if (metricNames.length === 0) {
         return <EvidenceEmpty message="No CloudWatch metrics data available for this incident" />
@@ -796,6 +799,10 @@ function EvidenceTabContent({ tab, data, faultClass }) {
         })
         return row
       })
+
+      if (chartData.length === 0) {
+        return <EvidenceEmpty message="No CloudWatch metrics data available for this incident. This usually happens if the function received no traffic in the 15-minute window preceding the incident." />
+      }
 
       const lineColors = [CHART_COLORS.primary, CHART_COLORS.amber, CHART_COLORS.emerald, CHART_COLORS.crimson]
       // Threshold lines per known metric name (lowercase as stored by collector)
@@ -823,7 +830,7 @@ function EvidenceTabContent({ tab, data, faultClass }) {
                   dataKey={name}
                   stroke={lineColors[i % lineColors.length]}
                   strokeWidth={1.5}
-                  dot={false}
+                  dot={chartData.length === 1 ? { r: 4 } : false}
                   connectNulls
                 />
               ))}
@@ -843,13 +850,32 @@ function EvidenceTabContent({ tab, data, faultClass }) {
     }
 
     case 'logs': {
-      const logData = evidence.log_data || data.log_data || evidence.logs_insights || data.logs_insights
+      const logData = evidence.logs_insights || evidence.log_data
       const rows = Array.isArray(logData?.rows) ? logData.rows
         : Array.isArray(logData) ? logData
         : typeof logData === 'string' ? logData.split('\n').filter(Boolean).map(l => ({ '@message': l }))
         : []
 
       if (rows.length === 0) {
+        // For misconfiguration, logs are not collected from CloudWatch (no Lambda log group)
+        // Show the config rule / resource context as a helpful message instead
+        const configRule = evidence.config_rule
+        const resourceId = evidence.resource_id
+        if (faultClass === 'misconfiguration') {
+          return (
+            <div className="text-center py-8">
+              <Eye className="mx-auto w-6 h-6 text-text-muted mb-2 opacity-50" />
+              <p className="text-xs text-text-secondary mb-1">No CloudWatch logs for misconfiguration events</p>
+              {configRule && (
+                <p className="text-xs text-text-muted mono">
+                  Config rule: {configRule}
+                  {resourceId ? ` | Resource: ${resourceId}` : ''}
+                </p>
+              )}
+              <p className="text-xs text-text-muted mt-2">Switch to the Config tab to view compliance evidence</p>
+            </div>
+          )
+        }
         return <EvidenceEmpty message="No log data collected" />
       }
 
@@ -901,8 +927,8 @@ function EvidenceTabContent({ tab, data, faultClass }) {
     }
 
     case 'x-ray': {
-      const summaries = evidence.xray_trace_summaries || data.xray_trace_summaries || []
-      const graph = evidence.xray_service_graph || data.xray_service_graph || []
+      const summaries = evidence.xray_trace_summaries || []
+      const graph = evidence.xray_service_graph || []
 
       if (summaries.length === 0 && graph.length === 0) {
         return <EvidenceEmpty message="No X-Ray trace data collected" />
@@ -918,10 +944,10 @@ function EvidenceTabContent({ tab, data, faultClass }) {
                   <div key={i} className="p-2 bg-bg-elevated rounded text-xs font-mono">
                     <div className="flex items-center space-x-3">
                       <span className="text-text-muted">ID</span>
-                      <span className="text-text-code truncate">{t.Id || t.id || '—'}</span>
-                      {t.Duration != null && <span className="text-text-secondary">{t.Duration}s</span>}
-                      {t.HasFault && <span className="badge badge-critical">Fault</span>}
-                      {t.HasError && <span className="badge badge-warning">Error</span>}
+                      <span className="text-text-code truncate">{t.id || '—'}</span>
+                      {t.duration != null && <span className="text-text-secondary">{t.duration}s</span>}
+                      {t.has_fault && <span className="badge badge-critical">Fault</span>}
+                      {t.has_error && <span className="badge badge-warning">Error</span>}
                     </div>
                   </div>
                 ))}
@@ -932,10 +958,18 @@ function EvidenceTabContent({ tab, data, faultClass }) {
             <div>
               <p className="text-xs text-text-secondary uppercase tracking-wide mb-2">Service Graph</p>
               <div className="space-y-1">
-                {graph.map((edge, i) => (
+                {graph.map((svc, i) => (
                   <div key={i} className="text-xs font-mono text-text-code">
-                    {edge.source || edge.Source} → {edge.target || edge.Target}
-                    {edge.ResponseTimeHistogram && <span className="text-text-muted ml-2">({edge.ResponseTimeHistogram.length} samples)</span>}
+                    <span className="text-text-primary">{svc.name || '(unknown)'}</span>
+                    {svc.type && <span className="text-text-muted ml-1">({svc.type})</span>}
+                    {Array.isArray(svc.edges) && svc.edges.map((edge, j) => (
+                      <div key={j} className="ml-4 text-text-secondary">
+                        → ref #{edge.ReferenceId ?? edge.reference_id}
+                        {edge.ResponseTimeHistogram && (
+                          <span className="text-text-muted ml-2">({edge.ResponseTimeHistogram.length} samples)</span>
+                        )}
+                      </div>
+                    ))}
                   </div>
                 ))}
               </div>
@@ -946,12 +980,14 @@ function EvidenceTabContent({ tab, data, faultClass }) {
     }
 
     case 'config': {
-      const compliance = evidence.config_compliance || data.config_compliance || {}
-      const history = evidence.resource_config_history || data.resource_config_history || []
+      const compliance = evidence.config_compliance || {}
+      const historyRaw = evidence.resource_config_history || {}
+      // Collector stores history as { items: [...] } or directly as []
+      const history = Array.isArray(historyRaw) ? historyRaw : (historyRaw.items || [])
       const results = compliance.results || []
 
       if (results.length === 0 && history.length === 0) {
-        return <EvidenceEmpty message="No AWS Config data collected" />
+        return <EvidenceEmpty message="No AWS Config compliance data collected. The Config rule evaluation may not have found non-compliant resources yet." />
       }
 
       return (
@@ -968,17 +1004,26 @@ function EvidenceTabContent({ tab, data, faultClass }) {
                   </tr>
                 </thead>
                 <tbody>
-                  {results.map((r, i) => (
-                    <tr key={i} className="border-b border-border-subtle">
-                      <td className="py-1 mono text-text-code">{r.EvaluationResultIdentifier?.EvaluationResultQualifier?.ResourceId || '—'}</td>
-                      <td className="py-1">
-                        <span className={`badge ${r.ComplianceType === 'NON_COMPLIANT' ? 'badge-critical' : 'badge-success'}`}>
-                          {r.ComplianceType || '—'}
-                        </span>
-                      </td>
-                      <td className="py-1 text-text-secondary">{r.Annotation || '—'}</td>
-                    </tr>
-                  ))}
+                  {results.map((r, i) => {
+                    // Collector stores flattened snake_case fields
+                    const resourceId = r.resource_id ||
+                      r.EvaluationResultIdentifier?.EvaluationResultQualifier?.ResourceId ||
+                      '—'
+                    const complianceType = r.compliance_type || r.ComplianceType || '—'
+                    const annotation = r.annotation || r.Annotation || '—'
+                    const isNonCompliant = complianceType === 'NON_COMPLIANT'
+                    return (
+                      <tr key={i} className="border-b border-border-subtle">
+                        <td className="py-1 mono text-text-code">{resourceId}</td>
+                        <td className="py-1">
+                          <span className={`badge ${isNonCompliant ? 'badge-critical' : 'badge-success'}`}>
+                            {complianceType}
+                          </span>
+                        </td>
+                        <td className="py-1 text-text-secondary">{annotation}</td>
+                      </tr>
+                    )
+                  })}
                 </tbody>
               </table>
             </div>
@@ -996,7 +1041,7 @@ function EvidenceTabContent({ tab, data, faultClass }) {
     }
 
     case 'guardduty': {
-      const finding = evidence.guardduty_finding || data.guardduty_finding
+      const finding = evidence.guardduty_finding
       if (!finding) return <EvidenceEmpty message="No GuardDuty finding data" />
       return (
         <pre className="text-xs text-text-code font-mono whitespace-pre-wrap overflow-auto max-h-80">
