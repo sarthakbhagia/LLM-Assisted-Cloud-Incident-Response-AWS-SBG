@@ -89,8 +89,11 @@ def lambda_handler(event, context):
         }
 
     # 3. Determine action key from the LLM diagnosis
+    # Use remediation.selected_action if present (chosen during approval),
+    # otherwise fall back to diagnosis.suggested_action
     diagnosis = record.get("diagnosis") or {}
-    action_key = (diagnosis.get("suggested_action") or "manual_review_required").strip()
+    remediation = record.get("remediation") or {}
+    action_key = (remediation.get("selected_action") or diagnosis.get("suggested_action") or "manual_review_required").strip()
     fault_class = record.get("fault_class", "unknown")
 
     logger.info(json.dumps({
@@ -98,6 +101,7 @@ def lambda_handler(event, context):
         "incident_id": incident_id,
         "action_key": action_key,
         "fault_class": fault_class,
+        "source": "selected_action" if remediation.get("selected_action") else "suggested_action",
     }))
 
     # 4. Execute the action - actions.py handles all actual AWS API calls

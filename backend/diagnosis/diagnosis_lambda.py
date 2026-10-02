@@ -43,9 +43,15 @@ DATA_LAKE_BUCKET = os.environ.get("DATA_LAKE_BUCKET", "")
 BEDROCK_MODEL_ID = os.environ.get(
     "BEDROCK_MODEL_ID", "apac.amazon.nova-pro-v1:0"
 )
-FALLBACK_MODEL_ID = "meta.llama3-70b-instruct-v1:0"
-SECOND_FALLBACK_MODEL_ID = "mistral.mistral-large-2402-v1:0"
-NOVA_FALLBACK_MODEL_ID = "apac.amazon.nova-micro-v1:0"
+FALLBACK_MODEL_ID = os.environ.get(
+    "BEDROCK_FALLBACK_MODEL_ID", "meta.llama3-70b-instruct-v1:0"
+)
+SECOND_FALLBACK_MODEL_ID = os.environ.get(
+    "BEDROCK_SECOND_FALLBACK_MODEL_ID", "mistral.mistral-large-2402-v1:0"
+)
+NOVA_FALLBACK_MODEL_ID = os.environ.get(
+    "BEDROCK_NOVA_FALLBACK_MODEL_ID", "apac.amazon.nova-micro-v1:0"
+)
 NOTIFY_FUNCTION_NAME = os.environ.get("NOTIFY_FUNCTION_NAME", "")
 
 # Increased max tokens for models to reduce truncation
@@ -59,6 +65,16 @@ NOVA_SYSTEM_PROMPT = """You are an AWS incident diagnosis expert. Output ONLY a 
 - suggested_action: MUST be exactly one of: scale_up, restart_service, lock_s3_bucket, tighten_iam_policy, restart_downstream_service, manual_review_required
 - explanation: string
 - reasoning_trace: string (NOT an array)
+- recommended_solutions: array of 2-3 objects, each with:
+    - id: string (e.g., sol-1, sol-2)
+    - action: MUST be exactly one of: scale_up, restart_service, lock_s3_bucket, tighten_iam_policy, restart_downstream_service, manual_review_required
+    - title: string — short human-readable title
+    - description: string — detailed description of the remediation action
+    - risk: MUST be exactly one of: low, medium, high
+    - expected_outcome: string — expected result after applying this solution
+    - rationale: string — why this solution addresses the root cause
+    - confidence: number (0.0 to 1.0)
+    - source: MUST be exactly one of: llm, runbook
 
 Rules:
 - NO markdown code fences (no ```json or ```)
@@ -67,6 +83,11 @@ Rules:
 - confidence must be a NUMBER not a string
 - reasoning_trace must be a STRING not an array
 - suggested_action must match one of the 6 exact values above
+- recommended_solutions[0].action MUST equal suggested_action
+- Each solution's action MUST be exactly one of: scale_up, restart_service, lock_s3_bucket, tighten_iam_policy, restart_downstream_service, manual_review_required
+- Each solution's risk MUST be exactly one of: low, medium, high
+- Each solution's source MUST be exactly one of: llm, runbook
+- Each solution's confidence MUST be a NUMBER between 0.0 and 1.0
 - Output must be complete and valid JSON — do not truncate."""
 
 LLAMA_SYSTEM_PROMPT = f"""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
@@ -212,7 +233,7 @@ def _invoke_llm_with_validation(
             logger.error(f"Failed to save raw response to S3: {e}")
             return None
 
-    def _attempt_llm_call(prompt: str, attempt_name: str) -> tuple[str | None, str | None, str | None, str | None]:
+    def _attempt_llm_call(prompt: str, attempt_name: str, fault_class: str) -> tuple[str | None, str | None, str | None, str | None]:
         """Attempt LLM call and validation. Returns (validated_diag, raw_response, failure_mode, model_used)."""
         raw_resp = None
         try:
@@ -226,7 +247,7 @@ def _invoke_llm_with_validation(
                     failure += f"; raw_saved_to_s3:{s3_key}"
                 return None, raw_resp, failure, model_name
             
-            validated_diag = _parse_and_validate_json(raw_resp)
+            validated_diag = _parse_and_validate_json(raw_resp, fault_class)
             return validated_diag, raw_resp, None, model_name
         except ValueError as exc:
             failure = None
@@ -249,7 +270,7 @@ def _invoke_llm_with_validation(
             return None, raw_resp, f"{attempt_name.lower()}_error: {exc}", model_name if 'model_name' in locals() else None
 
     # Attempt 1: Initial call
-    validated_diag, raw_response, failure_mode, model_used = _attempt_llm_call(user_prompt, "Initial")
+    validated_diag, raw_response, failure_mode, model_used = _attempt_llm_call(user_prompt, "Initial", fault_class)
     if validated_diag is not None:
         validated_diag["model_used"] = model_used
         return validated_diag, None
@@ -257,7 +278,7 @@ def _invoke_llm_with_validation(
     # Attempt 2: Retry with correction prompt (if we got a raw response)
     if raw_response:
         correction_prompt = build_error_correction_prompt(raw_response, failure_mode or "unknown error")
-        validated_diag, second_response, retry_failure, retry_model = _attempt_llm_call(correction_prompt, "Retry")
+        validated_diag, second_response, retry_failure, retry_model = _attempt_llm_call(correction_prompt, "Retry", fault_class)
         if validated_diag is not None:
             validated_diag["model_used"] = retry_model or model_used
             return validated_diag, "retry_succeeded"
@@ -454,7 +475,7 @@ def _call_bedrock(prompt: str) -> tuple[str, str | None, bool, str]:
         raise RuntimeError("All Bedrock models failed")
 
 
-def _parse_and_validate_json(raw_text: str) -> dict:
+def _parse_and_validate_json(raw_text: str, fault_class: str = "unknown") -> dict:
     """Extract and validate JSON against the diagnosis contract."""
     clean_text = raw_text.strip()
     # Strip markdown fence if present
@@ -571,6 +592,16 @@ def _parse_and_validate_json(raw_text: str) -> dict:
     if not reasoning_trace or not isinstance(reasoning_trace, str):
         reasoning_trace = "(no reasoning trace provided by model)"
 
+    # Parse and validate recommended_solutions if present
+    recommended_solutions = data.get("recommended_solutions")
+    if recommended_solutions is not None:
+        validated_solutions = _validate_recommended_solutions(
+            recommended_solutions, suggested_action, fault_class
+        )
+    else:
+        # Generate fallback solutions if not provided by LLM
+        validated_solutions = _generate_fallback_solutions(suggested_action, fault_class)
+
     return {
         "root_cause": root_cause,
         "confidence": float(confidence),
@@ -578,7 +609,199 @@ def _parse_and_validate_json(raw_text: str) -> dict:
         "suggested_action": suggested_action,
         "explanation": explanation,
         "reasoning_trace": reasoning_trace,
+        "recommended_solutions": validated_solutions,
     }
+
+
+def _validate_recommended_solutions(
+    solutions: list, primary_action: str, fault_class: str
+) -> list:
+    """
+    Validate the recommended_solutions array from LLM output.
+    Returns a list of validated solution objects.
+    """
+    if not isinstance(solutions, list) or len(solutions) < 2:
+        raise ValueError("recommended_solutions must be an array with at least 2 solutions")
+
+    validated = []
+    seen_actions = set()
+
+    for i, sol in enumerate(solutions):
+        if not isinstance(sol, dict):
+            raise ValueError(f"Solution {i} must be an object")
+
+        # Required fields
+        sol_id = sol.get("id", f"sol-{i+1}")
+        action = sol.get("action")
+        title = sol.get("title", "")
+        description = sol.get("description", "")
+        risk = sol.get("risk", "medium")
+        expected_outcome = sol.get("expected_outcome", "")
+        rationale = sol.get("rationale", "")
+        confidence = sol.get("confidence", 0.8)
+        source = sol.get("source", "llm")
+
+        if not action:
+            raise ValueError(f"Solution {i} missing required 'action' field")
+
+        # Normalize action using the same mapping as suggested_action
+        action_mapping = {
+            "scale_up": "scale_up",
+            "restart_service": "restart_service",
+            "lock_s3_bucket": "lock_s3_bucket",
+            "tighten_iam_policy": "tighten_iam_policy",
+            "restart_downstream_service": "restart_downstream_service",
+            "manual_review_required": "manual_review_required",
+            "increase instance type": "scale_up",
+            "scale out": "scale_up",
+            "scale up": "scale_up",
+            "add instances": "scale_up",
+            "increase concurrency": "scale_up",
+            "increase memory": "scale_up",
+            "adjust memory": "scale_up",
+            "restart": "restart_service",
+            "restart service": "restart_service",
+            "terminate processes": "restart_service",
+            "force cold start": "restart_service",
+            "redeploy": "restart_service",
+            "lock bucket": "lock_s3_bucket",
+            "block public access": "lock_s3_bucket",
+            "s3 public access": "lock_s3_bucket",
+            "tighten policy": "tighten_iam_policy",
+            "restrict permissions": "tighten_iam_policy",
+            "update iam": "tighten_iam_policy",
+            "iam policy": "tighten_iam_policy",
+            "restrict iam": "tighten_iam_policy",
+            "restart downstream": "restart_downstream_service",
+            "restart service c": "restart_downstream_service",
+            "restart service b": "restart_downstream_service",
+            "manual review": "manual_review_required",
+            "investigate manually": "manual_review_required",
+            "escalate": "manual_review_required",
+            "human review": "manual_review_required",
+        }
+        if action:
+            action_lower = action.lower().strip()
+            for key, valid_action in action_mapping.items():
+                if key in action_lower:
+                    action = valid_action
+                    break
+
+        if action not in VALID_SUGGESTED_ACTIONS:
+            raise ValueError(f"Solution {i} invalid action: {action}")
+
+        if risk not in ("low", "medium", "high"):
+            raise ValueError(f"Solution {i} invalid risk level: {risk}")
+
+        if source not in ("llm", "runbook"):
+            raise ValueError(f"Solution {i} invalid source: {source}")
+
+        # Deduplicate by action
+        if action in seen_actions:
+            continue
+        seen_actions.add(action)
+
+        # Validate confidence
+        if isinstance(confidence, str):
+            conf_map = {"high": 0.9, "medium": 0.7, "low": 0.5}
+            confidence = conf_map.get(confidence.lower(), 0.8)
+        try:
+            confidence = float(confidence)
+        except (TypeError, ValueError):
+            confidence = 0.8
+        confidence = max(0.0, min(1.0, confidence))
+
+        # Validate risk
+        if risk not in ("low", "medium", "high"):
+            risk = "medium"
+
+        # Validate source
+        if source not in ("llm", "runbook"):
+            source = "llm"
+
+        validated.append({
+            "id": sol_id,
+            "action": action,
+            "title": title or f"{action.replace('_', ' ').title()}",
+            "description": description or f"Apply {action.replace('_', ' ')} remediation",
+            "risk": risk,
+            "expected_outcome": expected_outcome or f"Apply {action.replace('_', ' ')} to resolve the incident",
+            "rationale": rationale or f"Based on diagnosis, {action.replace('_', ' ')} is the recommended remediation",
+            "confidence": float(confidence),
+            "source": source,
+        })
+
+    # Ensure first solution matches primary suggested_action
+    if validated and validated[0]["action"] != primary_action:
+        # Swap to put primary action first
+        for i, sol in enumerate(validated):
+            if sol["action"] == primary_action:
+                validated[0], validated[i] = validated[i], validated[0]
+                break
+
+    # Top-up with runbook alternatives if fewer than 2 distinct solutions
+    if len(validated) < 2:
+        fallback_sols = _generate_fallback_solutions(primary_action, fault_class)
+        for fs in fallback_sols:
+            if fs["action"] not in seen_actions:
+                validated.append(fs)
+                seen_actions.add(fs["action"])
+                if len(validated) >= 3:
+                    break
+
+    # Cap at 3 solutions
+    return validated[:3]
+
+
+def _generate_fallback_solutions(primary_action: str, fault_class: str) -> list:
+    """
+    Generate deterministic fallback solutions from runbook knowledge when LLM
+    doesn't provide enough valid solutions.
+    """
+    # Define alternative actions per fault class from runbooks
+    fault_class_alternatives = {
+        "resource_exhaustion": [
+            {"action": "scale_up", "risk": "low", "source": "runbook"},
+            {"action": "restart_service", "risk": "medium", "source": "runbook"},
+            {"action": "manual_review_required", "risk": "low", "source": "runbook"},
+        ],
+        "misconfiguration": [
+            {"action": "lock_s3_bucket", "risk": "medium", "source": "runbook"},
+            {"action": "tighten_iam_policy", "risk": "medium", "source": "runbook"},
+            {"action": "manual_review_required", "risk": "low", "source": "runbook"},
+        ],
+        "service_cascade": [
+            {"action": "restart_downstream_service", "risk": "medium", "source": "runbook"},
+            {"action": "restart_service", "risk": "medium", "source": "runbook"},
+            {"action": "manual_review_required", "risk": "low", "source": "runbook"},
+        ],
+    }
+
+    alternatives = fault_class_alternatives.get(fault_class, [])
+    solutions = []
+    seen = set()  # Track by action
+
+    for alt in alternatives:
+        action = alt["action"]
+        if action in seen:
+            continue
+        seen.add(action)
+
+        solutions.append({
+            "id": f"sol-{len(solutions)+1}",
+            "action": action,
+            "title": action.replace("_", " ").title(),
+            "description": f"Apply {action.replace('_', ' ')} remediation per runbook",
+            "risk": alt["risk"],
+            "expected_outcome": f"Resolve the {fault_class} incident via {action.replace('_', ' ')}",
+            "rationale": f"Runbook-prescribed alternative for {fault_class} fault class",
+            "confidence": 0.7,
+            "source": "runbook",
+        })
+        if len(solutions) >= 3:
+            break
+
+    return solutions
 
 
 def _generate_fallback_diagnosis(fault_class: str, raw_data: dict) -> dict:
@@ -606,6 +829,7 @@ def _generate_fallback_diagnosis(fault_class: str, raw_data: dict) -> dict:
             "explanation": "Service A experienced high duration causing timeout alarms. (Heuristic - LLM unavailable)",
             "reasoning_trace": "Heuristic fallback: LLM diagnosis unavailable. Pattern matched from fault_class=resource_exhaustion.",
             "is_heuristic": True,
+            "recommended_solutions": _generate_fallback_solutions("scale_up", "resource_exhaustion"),
         }
 
     if fault_class == "misconfiguration":
@@ -625,6 +849,7 @@ def _generate_fallback_diagnosis(fault_class: str, raw_data: dict) -> dict:
             "explanation": f"Security non-compliance detected on {resource_id}. (Heuristic - LLM unavailable)",
             "reasoning_trace": "Heuristic fallback: LLM diagnosis unavailable. Pattern matched from fault_class=misconfiguration.",
             "is_heuristic": True,
+            "recommended_solutions": _generate_fallback_solutions(action, "misconfiguration"),
         }
 
     if fault_class == "service_cascade":
@@ -636,6 +861,7 @@ def _generate_fallback_diagnosis(fault_class: str, raw_data: dict) -> dict:
             "explanation": "Cascading failure initiated at leaf service Service C. (Heuristic - LLM unavailable)",
             "reasoning_trace": "Heuristic fallback: LLM diagnosis unavailable. Pattern matched from fault_class=service_cascade.",
             "is_heuristic": True,
+            "recommended_solutions": _generate_fallback_solutions("restart_downstream_service", "service_cascade"),
         }
 
     return {
@@ -646,6 +872,7 @@ def _generate_fallback_diagnosis(fault_class: str, raw_data: dict) -> dict:
         "explanation": "Incident requires manual investigation. (Heuristic - LLM unavailable)",
         "reasoning_trace": "Heuristic fallback: unknown fault_class, cannot pattern-match.",
         "is_heuristic": True,
+        "recommended_solutions": _generate_fallback_solutions("manual_review_required", "unknown"),
     }
 
 
@@ -658,6 +885,19 @@ def _update_dynamodb_diagnosis(
     if not INCIDENTS_TABLE:
         logger.warning("INCIDENTS_TABLE not configured; skipping DynamoDB update")
         return
+
+    # Helper to convert floats to Decimal for DynamoDB
+    def _to_decimal(obj):
+        if isinstance(obj, float):
+            return Decimal(str(obj))
+        if isinstance(obj, dict):
+            return {k: _to_decimal(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [_to_decimal(v) for v in obj]
+        return obj
+
+    # Convert recommended_solutions floats to Decimal
+    rs_for_ddb = _to_decimal(diagnosis_output.get("recommended_solutions", []))
 
     table = _dynamodb.Table(INCIDENTS_TABLE)
     try:
@@ -674,7 +914,8 @@ def _update_dynamodb_diagnosis(
                 "diagnosis.#exp = :exp, "
                 "diagnosis.#ds = :ds, "
                 "diagnosis.#mu = :mu, "
-                "diagnosis.#ih = :ih"
+                "diagnosis.#ih = :ih, "
+                "diagnosis.#rs = :rs"
             ),
             ExpressionAttributeNames={
                 "#rc": "root_cause",
@@ -688,6 +929,7 @@ def _update_dynamodb_diagnosis(
                 "#ds": "diagnosis_status",
                 "#mu": "model_used",
                 "#ih": "is_heuristic",
+                "#rs": "recommended_solutions",
             },
             ExpressionAttributeValues={
                 ":rc": diagnosis_output["root_cause"],
@@ -701,6 +943,7 @@ def _update_dynamodb_diagnosis(
                 ":ds": diagnosis_output.get("diagnosis_status", "success"),
                 ":mu": diagnosis_output.get("model_used", BEDROCK_MODEL_ID),
                 ":ih": bool(diagnosis_output.get("is_heuristic", False)),
+                ":rs": rs_for_ddb,
             },
             ConditionExpression="attribute_exists(incident_id)"
         )

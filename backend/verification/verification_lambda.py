@@ -439,15 +439,27 @@ def _recheck_misconfiguration(signal: dict) -> tuple[str, str, str]:
         kwargs: dict = {
             "ConfigRuleName": config_rule,
             "ComplianceTypes": ["NON_COMPLIANT"],
-            "Limit": 10,
+            "Limit": 50,
         }
-        if resource_type and resource_id:
-            kwargs["Filters"] = {"ResourceType": resource_type, "ResourceId": resource_id}
-        elif resource_type:
-            kwargs["Filters"] = {"ResourceType": resource_type}
 
         resp = _config_client.get_compliance_details_by_config_rule(**kwargs)
-        non_compliant_items = resp.get("EvaluationResults", [])
+        all_results = resp.get("EvaluationResults", [])
+
+        # Filter client-side since Filters parameter is not supported
+        non_compliant_items = []
+        for result in all_results:
+            qualifier = (
+                result.get("EvaluationResultIdentifier", {})
+                .get("EvaluationResultQualifier", {})
+            )
+            res_type = qualifier.get("ResourceType")
+            res_id = qualifier.get("ResourceId")
+            if resource_type and res_type != resource_type:
+                continue
+            if resource_id and res_id != resource_id:
+                continue
+            non_compliant_items.append(result)
+
     except ClientError as exc:
         return ("inconclusive", signal_desc, f"Config GetComplianceDetailsByConfigRule error: {exc}")
 

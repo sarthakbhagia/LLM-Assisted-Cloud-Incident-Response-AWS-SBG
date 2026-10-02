@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { NavLink, useLocation } from 'react-router-dom'
 import { 
   BarChart3, 
@@ -13,10 +13,21 @@ import {
   BookOpen,
   HeartPulse
 } from 'lucide-react'
+import { apiClient } from '../config/api'
 
 export default function Layout({ children }) {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const [awsRegion, setAwsRegion] = useState(import.meta.env.VITE_AWS_REGION || 'ap-south-1')
   const location = useLocation()
+
+  // Fetch region from /api/health if not set via env
+  useEffect(() => {
+    if (!import.meta.env.VITE_AWS_REGION) {
+      apiClient.getHealth()
+        .then(data => data?.region && setAwsRegion(data.region))
+        .catch(() => setAwsRegion('ap-south-1'))
+    }
+  }, [])
 
   const navigation = [
     { name: 'Overview', href: '/', icon: Activity },
@@ -104,7 +115,7 @@ export default function Layout({ children }) {
                   {import.meta.env.VITE_ENVIRONMENT || (import.meta.env.MODE === 'production' ? 'dev' : import.meta.env.MODE)}
                 </div>
                 <div className="text-xs text-text-muted">
-                  {import.meta.env.VITE_AWS_REGION || 'ap-south-1'}
+                  {awsRegion}
                 </div>
               </div>
             )}

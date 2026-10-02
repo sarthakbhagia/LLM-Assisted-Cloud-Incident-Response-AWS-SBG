@@ -17,7 +17,19 @@ import {
   ArrowRight
 } from 'lucide-react'
 import { apiClient } from '../config/api'
-import { PIPELINE_STAGES, getConfidenceLevel } from '../utils/constants'
+import { 
+  PIPELINE_STAGES, 
+  getConfidenceLevel,
+  FAULT_CLASSES,
+  FAULT_CLASS_LABELS,
+  FAULT_CLASS_SEVERITY,
+  FAULT_CLASS_ICONS,
+  FAULT_CLASS_DESCRIPTIONS,
+  PIPELINE_STAGE_DETAILS,
+  DEMO_ACTION_LABELS,
+  SPEED_OPTIONS,
+  STAGE_LABELS,
+} from '../utils/constants'
 import {
   formatDate,
   getSeverityFromFaultClass
@@ -26,41 +38,6 @@ import {
 // ---------------------------------------------------------------------------
 // Demo Control Panel
 // ---------------------------------------------------------------------------
-
-const FAULT_TYPES = [
-  {
-    key: 'resource_exhaustion',
-    label: 'Resource Exhaustion',
-    severity: 'Critical',
-    severityClass: 'badge-critical',
-    description: 'Forces Service A Lambda Duration alarm into ALARM state. Simulates memory or compute exhaustion causing function timeouts.',
-    icon: '\u26a1',
-  },
-  {
-    key: 'service_cascade',
-    label: 'Service Cascade',
-    severity: 'High',
-    severityClass: 'badge-warning',
-    description: 'Fires the cascade alarm. Simulates Service C failing and propagating errors upstream through Service B to Service A.',
-    icon: '\uD83D\uDD17',
-  },
-  {
-    key: 'misconfiguration',
-    label: 'Misconfiguration',
-    severity: 'Medium',
-    severityClass: 'badge-info',
-    description: 'Triggers an AWS Config rule evaluation. Simulates a public S3 bucket or an overly-permissive IAM policy being detected.',
-    icon: '\uD83D\uDEE1\uFE0F',
-  },
-]
-
-const PIPELINE_STEPS = [
-  'CloudWatch alarm fires (or Config rule evaluates)',
-  'Collector Lambda gathers evidence - logs, metrics, Config findings',
-  'LLM diagnoses root cause and picks a suggested action',
-  'Incident appears here with status Pending Approval',
-  'Open the incident, review AI diagnosis, click Approve or Reject',
-]
 
 function DemoControlPanel({ onIncidentAppeared }) {
   const [injecting, setInjecting] = useState(null)   // fault_class currently injecting
@@ -154,42 +131,52 @@ function DemoControlPanel({ onIncidentAppeared }) {
 
       {/* Fault type cards */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-        {FAULT_TYPES.map(ft => (
-          <button
-            key={ft.key}
-            id={`inject-${ft.key}`}
-            onClick={() => handleInject(ft.key)}
-            disabled={!!injecting}
-            className={`text-left p-4 rounded-card border transition-all duration-200 group
-              ${
-                injecting === ft.key
+        {Object.entries(FAULT_CLASSES).map(([key, faultClass]) => {
+          const severity = FAULT_CLASS_SEVERITY[faultClass] || { label: 'Unknown', className: 'badge-info' }
+          const description = FAULT_CLASS_DESCRIPTIONS[faultClass] || ''
+          const actionLabel = DEMO_ACTION_LABELS[faultClass] || 'Inject'
+          const icon = FAULT_CLASS_ICONS[faultClass] || ''
+          const isDisabled = !!injecting
+          
+          const colorClass = severity.className.replace('badge-', 'text-')
+          const bgColorClass = severity.className.replace('badge-', 'bg-').replace('critical', 'crimson/10').replace('warning', 'amber/10').replace('info', 'emerald/10')
+          const borderColorClass = severity.className.replace('badge-', 'border-').replace('critical', 'crimson/20').replace('warning', 'amber/20').replace('info', 'emerald/20')
+          
+          return (
+            <button
+              key={faultClass}
+              id={`inject-${faultClass}`}
+              onClick={() => !isDisabled && handleInject(faultClass)}
+              disabled={isDisabled}
+              className={`text-left p-4 rounded-card border transition-all duration-200 group
+                ${injecting === faultClass
                   ? 'border-amber/50 bg-amber-surface'
-                  : 'border-border-default hover:border-amber/40 hover:bg-bg-elevated'
-              }
-              disabled:opacity-60 disabled:cursor-not-allowed
-            `}
-          >
-            <div className="flex items-start justify-between mb-2">
-              <span className="text-lg" role="img" aria-label={ft.label}>{ft.icon}</span>
-              <span className={`badge ${ft.severityClass} text-xs`}>{ft.severity}</span>
-            </div>
-            <p className="text-sm font-medium text-text-primary mb-1">{ft.label}</p>
-            <p className="text-xs text-text-secondary leading-relaxed">{ft.description}</p>
-            <div className="mt-3 flex items-center space-x-1">
-              {injecting === ft.key ? (
-                <>
-                  <Loader2 className="w-3 h-3 text-amber animate-spin" />
-                  <span className="text-xs text-amber">Injecting...</span>
-                </>
-              ) : (
-                <>
-                  <Zap className="w-3 h-3 text-text-muted group-hover:text-amber transition-colors" />
-                  <span className="text-xs text-text-muted group-hover:text-text-primary transition-colors">Inject fault</span>
-                </>
-              )}
-            </div>
-          </button>
-        ))}
+                  : `${bgColorClass} ${borderColorClass} hover:border-border-strong hover:bg-opacity-20`}
+                disabled:opacity-60 disabled:cursor-not-allowed
+              `}
+            >
+              <div className="flex items-start justify-between mb-2">
+                {icon && <span className="text-lg" role="img" aria-label={FAULT_CLASS_LABELS[faultClass]}>{icon}</span>}
+                <span className={`badge ${severity.className} text-xs`}>{severity.label}</span>
+              </div>
+              <p className="text-sm font-medium text-text-primary mb-1">{FAULT_CLASS_LABELS[faultClass]}</p>
+              <p className="text-xs text-text-secondary leading-relaxed">{description}</p>
+              <div className="mt-3 flex items-center space-x-1">
+                {injecting === faultClass ? (
+                  <>
+                    <Loader2 className="w-3 h-3 text-amber animate-spin" />
+                    <span className="text-xs text-amber">Injecting...</span>
+                  </>
+                ) : (
+                  <>
+                    <Zap className="w-3 h-3 text-text-muted group-hover:text-amber transition-colors" />
+                    <span className="text-xs text-text-muted group-hover:text-text-primary transition-colors">{actionLabel}</span>
+                  </>
+                )}
+              </div>
+            </button>
+          )
+        })}
       </div>
 
       {/* Toast feedback */}
@@ -235,12 +222,12 @@ function DemoControlPanel({ onIncidentAppeared }) {
       <div>
         <p className="text-xs font-medium text-text-secondary uppercase tracking-wide mb-2">What happens next</p>
         <ol className="space-y-1.5">
-          {PIPELINE_STEPS.map((step, i) => (
+          {PIPELINE_STAGE_DETAILS.map((step, i) => (
             <li key={i} className="flex items-start space-x-2">
               <span className="flex-shrink-0 w-4 h-4 rounded-full bg-bg-elevated border border-border-default text-xs text-text-muted flex items-center justify-center mt-0.5">
                 {i + 1}
               </span>
-              <span className="text-xs text-text-secondary">{step}</span>
+              <span className="text-xs text-text-secondary">{step.label}</span>
             </li>
           ))}
         </ol>
@@ -248,22 +235,6 @@ function DemoControlPanel({ onIncidentAppeared }) {
     </div>
   )
 }
-
-// Stage reveal sequence: what becomes visible at each step
-const STAGE_LABELS = [
-  'Detect',
-  'Collect',
-  'Diagnose',
-  'Approve',
-  'Remediate',
-  'Verify'
-]
-
-const SPEED_OPTIONS = [
-  { label: '1s', value: 1000 },
-  { label: '3s', value: 3000 },
-  { label: '5s', value: 5000 }
-]
 
 export default function ReplayMode() {
   const { incidentId: routeIncidentId } = useParams()

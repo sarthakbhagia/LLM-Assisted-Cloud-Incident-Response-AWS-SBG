@@ -6,7 +6,7 @@ import {
   ResponsiveContainer, ReferenceLine
 } from 'recharts'
 import { apiClient } from '../config/api'
-import { POLLING_INTERVALS, FAULT_CLASS_LABELS } from '../utils/constants'
+import { POLLING_INTERVALS, FAULT_CLASS_LABELS, CONFIDENCE_LEVELS } from '../utils/constants'
 import { formatMTTR } from '../utils/helpers'
 
 // Obsidian palette for charts
@@ -33,6 +33,9 @@ const CUSTOM_TOOLTIP_STYLE = {
   fontFamily: 'JetBrains Mono, monospace',
   color: CHART_COLORS.primary,
 }
+
+// High confidence threshold from shared constants (70%)
+const HIGH_CONFIDENCE_THRESHOLD = CONFIDENCE_LEVELS.MEDIUM.min
 
 export default function Analytics() {
   const [results, setResults] = useState(null)
@@ -78,6 +81,7 @@ export default function Analytics() {
   }
 
   // Derive summary stats: normalize S3 summary.json keys if present, or fallback to computing from incidents list
+  // verification_success_rate must come from verification.status === 'resolved', not rca_accuracy_pct
   const summary = results ? {
     average_mttr_minutes: typeof results.mttr_seconds_avg === 'number'
       ? Math.round(results.mttr_seconds_avg / 60)
@@ -85,8 +89,8 @@ export default function Analytics() {
     diagnosis_accuracy: typeof results.rca_accuracy_pct === 'number'
       ? Math.round(results.rca_accuracy_pct)
       : (results.diagnosis_accuracy || 0),
-    verification_success_rate: typeof results.rca_accuracy_pct === 'number'
-      ? Math.round(results.rca_accuracy_pct)
+    verification_success_rate: typeof results.verification_success_rate_pct === 'number'
+      ? Math.round(results.verification_success_rate_pct)
       : (results.verification_success_rate || 0),
     diagnosis_recovery_gap: typeof results.diagnosis_recovery_gap_pct === 'number'
       ? Math.round(results.diagnosis_recovery_gap_pct)
@@ -118,15 +122,15 @@ export default function Analytics() {
         />
         <MetricKPI
           label="Verification Success"
-          value={summary.verification_success_rate > 0 ? `${summary.verification_success_rate}%` : '—'}
+          value={summary.verification_success_rate !== null && summary.verification_success_rate > 0 ? `${summary.verification_success_rate}%` : '—'}
           sub="Resolved after remediation"
-          color={summary.verification_success_rate >= 80 ? 'text-emerald' : 'text-crimson'}
+          color={summary.verification_success_rate === null ? 'text-text-muted' : summary.verification_success_rate >= 80 ? 'text-emerald' : 'text-crimson'}
         />
         <MetricKPI
           label="D-R Gap"
-          value={summary.diagnosis_recovery_gap > 0 ? `${summary.diagnosis_recovery_gap}%` : '—'}
+          value={summary.diagnosis_recovery_gap !== null && summary.diagnosis_recovery_gap > 0 ? `${summary.diagnosis_recovery_gap}%` : '—'}
           sub="High confidence → not resolved"
-          color="text-crimson"
+          color={summary.diagnosis_recovery_gap === null ? 'text-text-muted' : 'text-crimson'}
         />
       </div>
 
@@ -175,7 +179,7 @@ export default function Analytics() {
                 <YAxis dataKey="correct" name="Correct" type="number" domain={[0, 1]} ticks={[0, 1]} tickFormatter={(v) => v === 1 ? 'Correct' : 'Wrong'} tick={{ fill: CHART_COLORS.muted, fontSize: 11, fontFamily: 'JetBrains Mono' }} />
                 <ZAxis range={[40, 40]} />
                 <Tooltip contentStyle={CUSTOM_TOOLTIP_STYLE} cursor={{ strokeDasharray: '3 3', stroke: CHART_COLORS.secondary }} formatter={(v, n) => [n === 'Confidence' ? `${v}%` : (v === 1 ? 'Correct' : 'Wrong'), n]} />
-                <ReferenceLine x={70} stroke={CHART_COLORS.amber} strokeDasharray="4 4" label={{ value: '70% threshold', fill: CHART_COLORS.amber, fontSize: 10 }} />
+                <ReferenceLine x={HIGH_CONFIDENCE_THRESHOLD} stroke={CHART_COLORS.amber} strokeDasharray="4 4" label={{ value: `${HIGH_CONFIDENCE_THRESHOLD}% threshold`, fill: CHART_COLORS.amber, fontSize: 10 }} />
                 <Scatter name="Diagnoses" data={confidenceData} fill={CHART_COLORS.primary} opacity={0.7} />
               </ScatterChart>
             </ResponsiveContainer>
@@ -184,7 +188,7 @@ export default function Analytics() {
 
         <ChartCard
           title="Diagnosis-Recovery Gap"
-          sub="High confidence diagnoses (>70%) where remediation didn't resolve the incident"
+          sub={`High confidence diagnoses (>${HIGH_CONFIDENCE_THRESHOLD}%) where remediation didn't resolve the incident`}
           highlight
         >
           {drGapData.length > 0 ? (
@@ -322,8 +326,8 @@ function computeSummaryFromIncidents(incidents) {
     }
   }
 
-  // Verification success rate
-  const verificationSuccessRate = total > 0 ? Math.round((resolved.length / total) * 100) : 0
+  // Verification success rate - return null when no data
+  const verificationSuccessRate = total > 0 ? Math.round((resolved.length / total) * 100) : null
 
   // D-R gap: high confidence but not resolved
   const highConfidenceIncidents = incidents.filter(i => {
@@ -335,7 +339,7 @@ function computeSummaryFromIncidents(incidents) {
         (highConfidenceIncidents.filter(i => i.verification?.status === 'not_resolved').length /
           highConfidenceIncidents.length) * 100
       )
-    : 0
+    : null
 
   return {
     average_mttr_minutes: mttrCount > 0 ? Math.round(totalMins / mttrCount) : 0,

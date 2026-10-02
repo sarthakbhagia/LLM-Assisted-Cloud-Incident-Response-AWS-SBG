@@ -14,6 +14,8 @@ export default function Overview() {
     averageMTTR: 0
   })
   const [recentResolved, setRecentResolved] = useState([])
+  const [systemHealth, setSystemHealth] = useState(null)
+  const [systemHealthError, setSystemHealthError] = useState(null)
   const [loading, setLoading] = useState(true)
   const [toast, setToast] = useState(null)
   
@@ -21,50 +23,20 @@ export default function Overview() {
 
   const fetchKPIs = async () => {
     try {
+      // Try to get aggregate KPIs from backend analytics endpoint first
+      const analyticsData = await apiClient.getAnalytics()
+      if (analyticsData && typeof analyticsData === 'object' && 'kpis' in analyticsData) {
+        setKpis(analyticsData.kpis)
+      } else {
+        // Fallback: compute from incidents list (limited to last 100)
+        const incidentsData = await apiClient.getIncidents({ limit: 100 })
+        const incidents = incidentsData?.items || []
+        computeKPIsFromIncidents(incidents)
+      }
+      
       const incidentsData = await apiClient.getIncidents({ limit: 100 })
       const incidents = incidentsData?.items || []
       
-      const activeIncidents = incidents.filter(i => 
-        !['resolved', 'rejected', 'failed'].includes(i.remediation?.status) &&
-        i.verification?.status !== 'resolved'
-      ).length
-      
-      const pendingApprovals = incidents.filter(i => 
-        i.remediation?.status === 'pending_approval'
-      ).length
-      
-      const resolvedIncidents = incidents.filter(i => 
-        i.verification?.status === 'resolved'
-      ).length
-      
-      const recoverySuccessRate = incidents.length > 0 
-        ? Math.round((resolvedIncidents / incidents.length) * 100)
-        : 0
-      
-      const resolvedWithTimes = incidents.filter(i => 
-        i.verification?.status === 'resolved' && 
-        i.detected_at && 
-        i.verification?.checked_at
-      )
-      
-      let averageMTTR = 0
-      if (resolvedWithTimes.length > 0) {
-        const totalMinutes = resolvedWithTimes.reduce((sum, incident) => {
-          const detected = new Date(incident.detected_at)
-          const resolved = new Date(incident.verification.checked_at)
-          const minutes = (resolved - detected) / (1000 * 60)
-          return sum + minutes
-        }, 0)
-        averageMTTR = Math.round(totalMinutes / resolvedWithTimes.length)
-      }
-      
-      setKpis({
-        activeIncidents,
-        pendingApprovals,
-        recoverySuccessRate,
-        averageMTTR
-      })
-
       const sorted = [...incidents]
         .filter(i => i.verification?.status === 'resolved' && i.verification?.checked_at)
         .sort((a, b) => new Date(b.verification.checked_at) - new Date(a.verification.checked_at))
@@ -73,13 +45,78 @@ export default function Overview() {
       setLoading(false)
     } catch (error) {
       console.error('Failed to fetch KPIs:', error)
+      // Fallback to client-side computation
+      try {
+        const incidentsData = await apiClient.getIncidents({ limit: 100 })
+        computeKPIsFromIncidents(incidentsData?.items || [])
+      } catch (e) {
+        console.error('Fallback KPI fetch also failed:', e)
+      }
       setLoading(false)
+    }
+  }
+
+  const computeKPIsFromIncidents = (incidents) => {
+    const activeIncidents = incidents.filter(i => 
+      !['resolved', 'rejected', 'failed'].includes(i.remediation?.status) &&
+      i.verification?.status !== 'resolved'
+    ).length
+    
+    const pendingApprovals = incidents.filter(i => 
+      i.remediation?.status === 'pending_approval'
+    ).length
+    
+    const resolvedIncidents = incidents.filter(i => 
+      i.verification?.status === 'resolved'
+    ).length
+    
+    const recoverySuccessRate = incidents.length > 0 
+      ? Math.round((resolvedIncidents / incidents.length) * 100)
+      : null
+    
+    const resolvedWithTimes = incidents.filter(i => 
+      i.verification?.status === 'resolved' && 
+      i.detected_at && 
+      i.verification?.checked_at
+    )
+    
+    let averageMTTR = 0
+    if (resolvedWithTimes.length > 0) {
+      const totalMinutes = resolvedWithTimes.reduce((sum, incident) => {
+        const detected = new Date(incident.detected_at)
+        const resolved = new Date(incident.verification.checked_at)
+        const minutes = (resolved - detected) / (1000 * 60)
+        return sum + minutes
+      }, 0)
+      averageMTTR = Math.round(totalMinutes / resolvedWithTimes.length)
+    }
+    
+    setKpis({
+      activeIncidents,
+      pendingApprovals,
+      recoverySuccessRate,
+      averageMTTR
+    })
+  }
+
+  const fetchSystemHealth = async () => {
+    try {
+      const health = await apiClient.getHealth()
+      setSystemHealth(health)
+      setSystemHealthError(null)
+    } catch (error) {
+      console.error('Failed to fetch system health:', error)
+      setSystemHealthError('Failed to load system health')
     }
   }
 
   useEffect(() => {
     fetchKPIs()
-    const interval = setInterval(fetchKPIs, POLLING_INTERVALS.INCIDENTS_FEED)
+    fetchSystemHealth()
+    const interval = setInterval(() => {
+      fetchKPIs()
+      fetchSystemHealth()
+    }, POLLING_INTERVALS.INCIDENTS_FEED)
     return () => clearInterval(interval)
   }, [])
 
@@ -130,14 +167,16 @@ export default function Overview() {
           trend={kpis.pendingApprovals === 0 ? 'None pending' : `${kpis.pendingApprovals} awaiting`}
         />
         
-        <KPICard
+<KPICard
           title="Recovery Rate"
-          value={loading ? '—' : `${kpis.recoverySuccessRate}%`}
+          value={loading ? '—' : (kpis.recoverySuccessRate !== null ? `${kpis.recoverySuccessRate}%` : '—')}
           icon={CheckCircle}
-          iconColor={kpis.recoverySuccessRate >= 80 ? 'text-emerald' : 
+          iconColor={kpis.recoverySuccessRate === null ? 'text-text-muted' :
+                    kpis.recoverySuccessRate >= 80 ? 'text-emerald' : 
                     kpis.recoverySuccessRate >= 60 ? 'text-amber' : 'text-crimson'}
-          trend={kpis.recoverySuccessRate >= 80 ? 'Excellent' : 
-                 kpis.recoverySuccessRate >= 60 ? 'Good' : 'Needs attention'}
+          trend={kpis.recoverySuccessRate === null ? 'No data yet' : 
+                  kpis.recoverySuccessRate >= 80 ? 'Excellent' : 
+                  kpis.recoverySuccessRate >= 60 ? 'Good' : 'Needs attention'}
         />
         
         <KPICard
@@ -157,7 +196,7 @@ export default function Overview() {
             <div className="flex items-center justify-between mb-6">
               <h2 className="text-lg font-semibold text-text-primary">Incident Feed</h2>
               <div className="text-xs text-text-secondary">
-                Live polling every 5s across all services
+                Live polling every {POLLING_INTERVALS.INCIDENTS_FEED / 1000}s across all services
               </div>
             </div>
             <IncidentFeed />
@@ -166,7 +205,7 @@ export default function Overview() {
 
         {/* Right Panel - System Health */}
         <div className="space-y-4">
-          <SystemHealthCard />
+          <SystemHealthCard health={systemHealth} error={systemHealthError} />
           <RecentRemediationsCard incidents={recentResolved} />
         </div>
       </div>
@@ -195,29 +234,72 @@ function KPICard({ title, value, icon: Icon, iconColor, trend }) {
   )
 }
 
-function SystemHealthCard() {
-  const services = [
-    { name: 'Service A', status: 'healthy' },
-    { name: 'Service B', status: 'healthy' },
-    { name: 'Service C', status: 'healthy' },
-    { name: 'Collector', status: 'healthy' },
-    { name: 'Diagnosis', status: 'healthy' }
-  ]
+function SystemHealthCard({ health, error }) {
+  if (error) {
+    return (
+      <div className="card">
+        <h3 className="text-sm font-medium text-text-primary mb-4">System Health</h3>
+        <div className="p-3 bg-crimson-surface/30 border border-crimson/30 rounded-card">
+          <p className="text-xs text-crimson">{error}</p>
+          <button onClick={() => window.location.reload()} className="btn-ghost text-xs mt-2">Retry</button>
+        </div>
+      </div>
+    )
+  }
+
+  if (!health) {
+    return (
+      <div className="card">
+        <h3 className="text-sm font-medium text-text-primary mb-4">System Health</h3>
+        <div className="space-y-3">
+          {Array.from({ length: 5 }).map((_, i) => (
+            <div key={i} className="h-8 bg-bg-elevated rounded animate-pulse" />
+          ))}
+        </div>
+      </div>
+    )
+  }
+
+  const services = health.services || []
+  const handlers = health.pipeline_handlers || {}
+  const overall = health.overall === 'ok'
+  const criticalFailures = health.critical_failures ?? 0
 
   return (
     <div className="card">
-      <h3 className="text-sm font-medium text-text-primary mb-4">System Health</h3>
-      <div className="space-y-3">
-        {services.map((service) => (
-          <div key={service.name} className="flex items-center justify-between">
-            <span className="text-xs text-text-secondary">{service.name}</span>
+      <div className="flex items-center justify-between mb-4">
+        <h3 className="text-sm font-medium text-text-primary">System Health</h3>
+        <span className={`badge ${overall ? 'badge-success' : 'badge-critical'}`}>
+          {overall ? 'Healthy' : 'Degraded'}
+        </span>
+      </div>
+      <div className="space-y-2">
+        {services.map((svc) => (
+          <div key={svc.service} className="flex items-center justify-between">
+            <span className="text-xs text-text-secondary">{svc.service}</span>
             <div className="flex items-center space-x-2">
-              <div className="w-2 h-2 bg-emerald rounded-full"></div>
-              <span className="text-xs text-emerald">Healthy</span>
+              <div className={`w-2 h-2 rounded-full ${svc.status === 'ok' ? 'bg-emerald' : 'bg-crimson'}`}></div>
+              <span className={`text-xs ${svc.status === 'ok' ? 'text-emerald' : 'text-crimson'}`}>
+                {svc.status === 'ok' ? 'Healthy' : 'Unhealthy'}
+              </span>
+            </div>
+          </div>
+        ))}
+        {Object.entries(handlers).map(([name, status]) => (
+          <div key={name} className="flex items-center justify-between">
+            <span className="text-xs text-text-secondary">{name}</span>
+            <div className="flex items-center space-x-2">
+              <div className={`w-2 h-2 rounded-full ${status === 'loaded' ? 'bg-emerald' : 'bg-crimson'}`}></div>
+              <span className={`text-xs ${status === 'loaded' ? 'text-emerald' : 'text-crimson'}`}>
+                {status === 'loaded' ? 'Loaded' : 'Error'}
+              </span>
             </div>
           </div>
         ))}
       </div>
+      {!overall && criticalFailures > 0 && (
+        <p className="text-xs text-crimson mt-2">{criticalFailures} critical service(s) unavailable</p>
+      )}
     </div>
   )
 }

@@ -61,6 +61,40 @@ Parameters:
       Bedrock model ID to use for diagnosis. Must be available in the deployment region.
       Examples: apac.amazon.nova-pro-v1:0 (ap-south-1), anthropic.claude-3-5-sonnet-20240620-v1:0, meta.llama3-70b-instruct-v1:0
 
+  BedrockFallbackModelId:
+    Type: String
+    Default: "meta.llama3-70b-instruct-v1:0"
+    Description: >
+      First fallback Bedrock model ID if primary model is unavailable.
+
+  BedrockSecondFallbackModelId:
+    Type: String
+    Default: "mistral.mistral-large-2402-v1:0"
+    Description: >
+      Second fallback Bedrock model ID.
+
+  BedrockNovaFallbackModelId:
+    Type: String
+    Default: "apac.amazon.nova-micro-v1:0"
+    Description: >
+      Nova Micro fallback Bedrock model ID.
+
+  AllowedOrigin:
+    Type: String
+    Default: ""
+    Description: >
+      Frontend origin for CORS (e.g., https://d1234567890.cloudfront.net).
+      Leave empty to allow all origins (development only). In production,
+      must be set to the CloudFront distribution URL.
+
+  DashboardApiKey:
+    Type: String
+    Default: ""
+    Description: >
+      API key for dashboard write endpoints (approve, reject, diagnose).
+      Leave empty to disable API key authentication (development only).
+      In production, must be set to a secure random string stored in SSM.
+
 Resources:
 
   # ---------------------------------------------------------------------------
@@ -509,6 +543,9 @@ Resources:
           INCIDENTS_TABLE: !Ref IncidentsTable
           DATA_LAKE_BUCKET: !Ref IncidentDataLake
           BEDROCK_MODEL_ID: !Ref BedrockModelId
+          BEDROCK_FALLBACK_MODEL_ID: !Ref BedrockFallbackModelId
+          BEDROCK_SECOND_FALLBACK_MODEL_ID: !Ref BedrockSecondFallbackModelId
+          BEDROCK_NOVA_FALLBACK_MODEL_ID: !Ref BedrockNovaFallbackModelId
           NOTIFY_FUNCTION_NAME: !Ref NotifyFunction
 
   # ---------------------------------------------------------------------------
@@ -825,6 +862,7 @@ Resources:
   # ---------------------------------------------------------------------------
   # IAM role: Dashboard API Lambda.
   # Read-only on incidents table and data lake. No write actions of any kind.
+  # AWS calls: DynamoDB Scan/GetItem, S3 GetObject/ListObjectsV2/HeadBucket
   # ---------------------------------------------------------------------------
   DashboardApiRole:
     Type: AWS::IAM::Role
@@ -849,8 +887,8 @@ Resources:
                   - dynamodb:GetItem
                   - dynamodb:Query
                   - dynamodb:Scan
-                Resource: "arn:aws:dynamodb:*:*:table/incidents-*"
-                # Deny any write action explicitly to make the guardrail auditable
+                Resource: !GetAtt IncidentsTable.Arn
+                # Explicit deny of write actions for auditable guardrail
               - Effect: Deny
                 Action:
                   - dynamodb:PutItem
@@ -858,7 +896,7 @@ Resources:
                   - dynamodb:DeleteItem
                   - dynamodb:BatchWriteItem
                   - dynamodb:TransactWriteItems
-                Resource: "*"
+                Resource: !GetAtt IncidentsTable.Arn
         - PolicyName: datalake-read-only
           PolicyDocument:
             Version: '2012-10-17'
@@ -877,7 +915,9 @@ Resources:
                   - s3:PutObject
                   - s3:DeleteObject
                   - s3:PutObjectAcl
-                Resource: "*"
+                Resource:
+                  - !GetAtt IncidentDataLake.Arn
+                  - !Sub "${IncidentDataLake.Arn}/*"
 
   # ---------------------------------------------------------------------------
   # Dashboard API Lambda — six read-only routes on the existing API Gateway
@@ -897,6 +937,7 @@ Resources:
         Variables:
           INCIDENTS_TABLE: !Ref IncidentsTable
           DATA_LAKE_BUCKET: !Ref IncidentDataLake
+          ALLOWED_ORIGIN: !Ref AllowedOrigin
       Events:
         GetIncidents:
           Type: Api
@@ -987,7 +1028,8 @@ Resources:
   # DASHBOARD ACTIONS FUNCTION
   # Write-path and action routes (approve, reject, diagnose, trace, services).
   # Kept separate from DashboardApiFunction to preserve its strict read-only
-  # IAM guardrail.  This function has narrow UpdateItem + Lambda:Invoke perms.
+  # IAM guardrail.  This function has narrow UpdateItem + Lambda:Invoke + CloudWatch:GetMetricStatistics + Lambda:ListFunctions perms.
+  # AWS calls: DynamoDB GetItem/UpdateItem/Scan, S3 GetObject/ListObjectsV2, Lambda InvokeFunction/ListFunctions, CloudWatch GetMetricStatistics
   # ===========================================================================
 
   DashboardActionsRole:
@@ -1008,15 +1050,20 @@ Resources:
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
-              # Read: look up incident before approve/reject/diagnose
+              # Read: look up incident before approve/reject/diagnose/trace
               - Effect: Allow
                 Action:
                   - dynamodb:GetItem
                 Resource: !GetAtt IncidentsTable.Arn
-              # Write: approve and reject update remediation.status only
+              # Write: approve and reject update remediation.status only (conditional)
               - Effect: Allow
                 Action:
                   - dynamodb:UpdateItem
+                Resource: !GetAtt IncidentsTable.Arn
+              # Scan for active incidents in /api/services
+              - Effect: Allow
+                Action:
+                  - dynamodb:Scan
                 Resource: !GetAtt IncidentsTable.Arn
         - PolicyName: datalake-trace-read
           PolicyDocument:
@@ -1045,6 +1092,22 @@ Resources:
                 Action:
                   - lambda:InvokeFunction
                 Resource: !GetAtt RemediationFunction.Arn
+        - PolicyName: cloudwatch-metrics-read
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudwatch:GetMetricStatistics
+                Resource: "*"
+        - PolicyName: lambda-list-functions
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:ListFunctions
+                Resource: "*"
 
   DashboardActionsFunction:
     Type: AWS::Serverless::Function
@@ -1063,6 +1126,8 @@ Resources:
           DATA_LAKE_BUCKET: !Ref IncidentDataLake
           DIAGNOSIS_FUNCTION_NAME: !Ref DiagnosisFunction
           REMEDIATION_FUNCTION_NAME: !Ref RemediationFunction
+          ALLOWED_ORIGIN: !Ref AllowedOrigin
+          DASHBOARD_API_KEY: !Ref DashboardApiKey
       Events:
         ApproveIncident:
           Type: Api

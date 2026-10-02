@@ -220,6 +220,33 @@ def _parse_event(event: dict) -> dict:
 # Evidence collection — dispatches by fault_class
 # ===========================================================================
 
+def _get_alarm_thresholds(alarm_name: str) -> dict:
+    """Fetch CloudWatch alarm definition and extract threshold info."""
+    if not alarm_name:
+        return {}
+    try:
+        resp = _cw.describe_alarms(AlarmNames=[alarm_name])
+        alarms = resp.get("MetricAlarms", [])
+        if not alarms:
+            return {}
+        alarm = alarms[0]
+        return {
+            "metric_name": alarm.get("MetricName"),
+            "namespace": alarm.get("Namespace"),
+            "threshold": alarm.get("Threshold"),
+            "comparison_operator": alarm.get("ComparisonOperator"),
+            "period": alarm.get("Period"),
+            "evaluation_periods": alarm.get("EvaluationPeriods"),
+            "datapoints_to_alarm": alarm.get("DatapointsToAlarm"),
+            "statistic": alarm.get("Statistic"),
+            "dimensions": alarm.get("Dimensions"),
+            "treat_missing_data": alarm.get("TreatMissingData"),
+        }
+    except ClientError as exc:
+        logger.warning(json.dumps({"event": "describe_alarm_error", "alarm_name": alarm_name, "error": str(exc)}, default=str))
+        return {}
+
+
 def _collect_evidence(parsed: dict, start_ms: int, end_ms: int) -> dict:
     fault_class = parsed["fault_class"]
 
@@ -254,6 +281,11 @@ def _collect_resource_exhaustion(parsed: dict, start_ms: int, end_ms: int) -> di
         "function_name": function_name,
         "log_group": log_group,
     }
+
+    # Add alarm thresholds for frontend threshold lines
+    alarm_thresholds = _get_alarm_thresholds(alarm_name)
+    if alarm_thresholds:
+        evidence["alarm_thresholds"] = alarm_thresholds
 
     # SE-5: If the function name could not be resolved, record the reason explicitly in
     # the evidence bundle so operators know why logs and metrics are missing, instead of
@@ -519,6 +551,23 @@ def _collect_service_cascade(parsed: dict, start_ms: int, end_ms: int) -> dict:
         "service_functions": service_functions,
         "log_groups_queried": log_groups,
     }
+
+    # Add alarm thresholds for the composite alarm and component alarms
+    composite_alarm_name = parsed.get("alarm_name", "")
+    alarm_thresholds = _get_alarm_thresholds(composite_alarm_name)
+    if alarm_thresholds:
+        evidence["alarm_thresholds"] = alarm_thresholds
+
+    # Also fetch component alarm thresholds for service_cascade
+    env = os.environ.get("ENVIRONMENT", "dev")
+    component_alarms = [
+        f"incident-service-a-errors-{env}",
+        f"incident-service-c-latency-{env}",
+    ]
+    for ca in component_alarms:
+        ca_thresholds = _get_alarm_thresholds(ca)
+        if ca_thresholds:
+            evidence.setdefault("component_alarm_thresholds", {})[ca] = ca_thresholds
 
     # CW Logs Insights across all service log groups
     if log_groups:

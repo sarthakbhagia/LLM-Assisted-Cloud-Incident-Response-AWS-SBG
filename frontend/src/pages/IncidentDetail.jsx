@@ -22,47 +22,21 @@ import {
   ReferenceLine, ResponsiveContainer
 } from 'recharts'
 import { apiClient } from '../config/api'
-import { POLLING_INTERVALS, PIPELINE_STAGES, getConfidenceLevel } from '../utils/constants'
+import { 
+  POLLING_INTERVALS, 
+  PIPELINE_STAGES, 
+  getConfidenceLevel,
+  ACTION_RISK,
+  ACTION_LABELS,
+  HIGH_RISK_ACTIONS,
+  CHART_COLORS
+} from '../utils/constants'
 import { 
   formatDate, 
   getIncidentStatus, 
   getPipelineStageStatus, 
   getSeverityFromFaultClass
 } from '../utils/helpers'
-
-// Risk levels per action type
-const ACTION_RISK = {
-  lock_s3_bucket: { level: 'High', className: 'badge-critical' },
-  tighten_iam_policy: { level: 'High', className: 'badge-critical' },
-  scale_up: { level: 'Medium', className: 'badge-warning' },
-  restart_service: { level: 'Medium', className: 'badge-warning' },
-  restart_downstream_service: { level: 'Medium', className: 'badge-warning' },
-  manual_review_required: { level: 'Low', className: 'badge-info' },
-}
-
-const ACTION_LABELS = {
-  lock_s3_bucket: 'Lock S3 Bucket (Block Public Access)',
-  tighten_iam_policy: 'Tighten IAM Policy',
-  scale_up: 'Scale Up Lambda Concurrency',
-  // SE-3: This bumps a Lambda env var to force a cold-start, NOT an ECS deployment.
-  restart_service: 'Restart Service (Force Lambda Cold-Start)',
-  restart_downstream_service: 'Restart Downstream Service (Force Lambda Cold-Start)',
-  manual_review_required: 'Manual Review Required',
-}
-
-const HIGH_RISK_ACTIONS = new Set(['lock_s3_bucket', 'tighten_iam_policy'])
-
-const CHART_COLORS = {
-  primary: '#F2F2F2',
-  crimson: '#D63C4B',
-  amber: '#F0A23A',
-  emerald: '#46B887',
-  muted: '#55555D',
-  secondary: '#85858C',
-  gridLine: '#1E1E22',
-  tooltip: '#1B1B1F',
-  tooltipBorder: '#2A2A2D',
-}
 
 export default function IncidentDetail() {
   const { incidentId } = useParams()
@@ -369,13 +343,15 @@ function DiagnosisPanel({ incident, onRetrigger, retriggering, retriggerMessage 
   return (
     <div className="card">
       <div className="flex items-center justify-between mb-4">
-        <div className="flex items-center space-x-2">
-          <h3 className="text-sm font-medium text-text-primary">AI Diagnosis</h3>
-          <span className="badge badge-info text-xs">Amazon Nova Pro</span>
-          {hasRootCause && !diagnosis.failure_mode && (
-            <span className="badge badge-success text-xs">Schema validated</span>
-          )}
-        </div>
+<div className="flex items-center space-x-2">
+        <h3 className="text-sm font-medium text-text-primary">AI Diagnosis</h3>
+        {hasRootCause && diagnosis.model_used && (
+          <span className="badge badge-info text-xs">{diagnosis.model_used}</span>
+        )}
+        {hasRootCause && !diagnosis.failure_mode && (
+          <span className="badge badge-success text-xs">Schema validated</span>
+        )}
+      </div>
         {!hasRootCause && (
           <button
             onClick={onRetrigger}
@@ -805,10 +781,34 @@ function EvidenceTabContent({ tab, data, faultClass }) {
       }
 
       const lineColors = [CHART_COLORS.primary, CHART_COLORS.amber, CHART_COLORS.emerald, CHART_COLORS.crimson]
-      // Threshold lines per known metric name (lowercase as stored by collector)
-      const THRESHOLDS = {
-        duration: 50000,
-        errors: 5,
+      
+      // Get thresholds from evidence bundle (written by collector from CloudWatch alarm definitions)
+      // The collector writes alarm_thresholds as the full alarm definition object:
+      // { threshold: 50000, metric_name: 'Duration', comparison_operator: 'GreaterThanThreshold', ... }
+      // We need to extract the threshold value and map it to the metric name used in the chart.
+      const rawAlarmThresholds = evidence.alarm_thresholds || {}
+      const alarmThresholds = {}
+      if (rawAlarmThresholds && typeof rawAlarmThresholds === 'object') {
+        // If it's the full alarm object with a 'threshold' field, use that
+        if (rawAlarmThresholds.threshold != null && rawAlarmThresholds.metric_name) {
+          const metricKey = String(rawAlarmThresholds.metric_name).toLowerCase()
+          alarmThresholds[metricKey] = Number(rawAlarmThresholds.threshold)
+        } else {
+          // Otherwise assume it's already a flat object { metric_name: threshold_value, ... }
+          for (const [key, value] of Object.entries(rawAlarmThresholds)) {
+            if (typeof value === 'number' || (typeof value === 'string' && !isNaN(Number(value)))) {
+              alarmThresholds[String(key).toLowerCase()] = Number(value)
+            }
+          }
+        }
+      }
+      // Also check component_alarm_thresholds for service_cascade
+      const componentThresholds = evidence.component_alarm_thresholds || {}
+      for (const [alarmName, alarmDef] of Object.entries(componentThresholds)) {
+        if (alarmDef && typeof alarmDef === 'object' && alarmDef.threshold != null && alarmDef.metric_name) {
+          const metricKey = String(alarmDef.metric_name).toLowerCase()
+          alarmThresholds[metricKey] = Number(alarmDef.threshold)
+        }
       }
 
       return (
@@ -834,10 +834,10 @@ function EvidenceTabContent({ tab, data, faultClass }) {
                   connectNulls
                 />
               ))}
-              {metricNames.map(name => THRESHOLDS[name] != null && (
+              {metricNames.map(name => alarmThresholds[name] != null && (
                 <ReferenceLine
                   key={`threshold-${name}`}
-                  y={THRESHOLDS[name]}
+                  y={alarmThresholds[name]}
                   stroke={CHART_COLORS.crimson}
                   strokeDasharray="4 4"
                   label={{ value: `${name} threshold`, fill: CHART_COLORS.crimson, fontSize: 10 }}

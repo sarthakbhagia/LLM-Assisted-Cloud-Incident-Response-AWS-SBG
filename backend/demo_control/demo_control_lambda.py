@@ -53,7 +53,8 @@ FAULT_CLASS_ALARMS = {
 
 # The two component metric alarms that drive the composite cascade alarm.
 # Setting BOTH to ALARM causes the composite to transition to ALARM naturally,
-# which DOES produce an EventBridge event that fires the CollectorFunction.
+# which DOES generate an EventBridge event (unlike calling SetAlarmState directly
+# on a composite alarm, which does NOT fire EventBridge).
 SERVICE_CASCADE_COMPONENT_ALARMS = [
     f"incident-service-a-errors-{ENVIRONMENT}",
     f"incident-service-c-latency-{ENVIRONMENT}",
@@ -61,6 +62,16 @@ SERVICE_CASCADE_COMPONENT_ALARMS = [
 
 # Valid fault classes
 VALID_FAULT_CLASSES = {"resource_exhaustion", "misconfiguration", "service_cascade"}
+
+# Valid suggested actions (must match VALID_SUGGESTED_ACTIONS in prompts.py)
+VALID_SUGGESTED_ACTIONS = [
+    "scale_up",
+    "restart_service",
+    "lock_s3_bucket",
+    "tighten_iam_policy",
+    "restart_downstream_service",
+    "manual_review_required",
+]
 
 # CORS headers
 CORS_HEADERS = {
@@ -251,45 +262,176 @@ def _inject_fault(fault_class: str) -> dict:
     return {"success": False, "error": f"Unknown fault_class: {fault_class}"}
 
 
-def _approve_incident(incident_id: str) -> dict:
-    """Approve an incident by invoking the approval handler internally."""
-    if not APPROVAL_FUNCTION_NAME:
-        return {"success": False, "error": "Approval function not configured"}
+def _approve_incident(incident_id: str, solution_id: str | None = None, selected_action: str | None = None) -> dict:
+    """Approve an incident by writing directly to DynamoDB (dashboard-trust model).
+    This is the demo approve path - it bypasses the HMAC approval handler.
+    """
+    if not INCIDENTS_TABLE:
+        return {"success": False, "error": "INCIDENTS_TABLE not configured"}
 
     try:
-        payload = {
-            "incident_id": incident_id,
-            "action": "approve",
-            # Generate a valid token for the approval handler
-            # The approval handler validates HMAC(token, incident_id:approve)
-            # We need to read the secret from SSM to generate a valid token
-        }
-        # Read the approval secret from SSM
-        ssm = boto3.client("ssm")
-        secret_param = f"/llm-incident-response/approval-token-secret"
+        table = _dynamodb.Table(INCIDENTS_TABLE)
+        from datetime import datetime, timezone
+
+        # Fetch incident to get recommended_solutions for validation
+        resp = table.get_item(Key={"incident_id": incident_id})
+        item = resp.get("Item")
+        if not item:
+            return {"success": False, "error": f"Incident {incident_id!r} not found"}
+
+        remediation_status = (item.get("remediation") or {}).get("status")
+        if remediation_status != "pending_approval":
+            return {"success": False, "error": f"Incident is not pending approval (current status: {remediation_status})"}
+
+        diagnosis = item.get("diagnosis", {})
+        recommended_solutions = diagnosis.get("recommended_solutions")
+        fault_class = item.get("fault_class", "unknown")
+        suggested_action = diagnosis.get("suggested_action", "manual_review_required")
+
+        if not recommended_solutions:
+            # Derive using same logic
+            fault_class_alternatives = {
+                "resource_exhaustion": [
+                    {"action": "scale_up", "risk": "low", "source": "runbook"},
+                    {"action": "restart_service", "risk": "medium", "source": "runbook"},
+                    {"action": "manual_review_required", "risk": "low", "source": "runbook"},
+                ],
+                "misconfiguration": [
+                    {"action": "lock_s3_bucket", "risk": "medium", "source": "runbook"},
+                    {"action": "tighten_iam_policy", "risk": "medium", "source": "runbook"},
+                    {"action": "manual_review_required", "risk": "low", "source": "runbook"},
+                ],
+                "service_cascade": [
+                    {"action": "restart_downstream_service", "risk": "medium", "source": "runbook"},
+                    {"action": "restart_service", "risk": "medium", "source": "runbook"},
+                    {"action": "manual_review_required", "risk": "low", "source": "runbook"},
+                ],
+            }
+            alternatives = fault_class_alternatives.get(fault_class, [])
+            solutions = []
+            seen = set()
+
+            primary_solution = {
+                "id": "sol-1",
+                "action": suggested_action,
+                "title": suggested_action.replace("_", " ").title(),
+                "description": f"Apply {suggested_action.replace('_', ' ')} remediation per diagnosis",
+                "risk": "medium",
+                "expected_outcome": f"Resolve the incident via {suggested_action.replace('_', ' ')}",
+                "rationale": "Primary diagnosis suggested action",
+                "confidence": 0.9,
+                "source": "llm",
+            }
+            solutions.append(primary_solution)
+            seen.add(suggested_action)
+
+            for alt in alternatives:
+                action = alt["action"]
+                if action in seen:
+                    continue
+                seen.add(action)
+
+                solutions.append({
+                    "id": f"sol-{len(solutions)+1}",
+                    "action": action,
+                    "title": action.replace("_", " ").title(),
+                    "description": f"Apply {action.replace('_', ' ')} remediation per runbook",
+                    "risk": alt["risk"],
+                    "expected_outcome": f"Resolve the {fault_class} incident via {action.replace('_', ' ')}",
+                    "rationale": f"Runbook-prescribed alternative for {fault_class} fault class",
+                    "confidence": 0.7,
+                    "source": "runbook",
+                })
+                if len(solutions) >= 3:
+                    break
+            recommended_solutions = solutions
+
+        # Determine which solution to use
+        selected_solution = None
+
+        if solution_id:
+            for sol in recommended_solutions:
+                if sol.get("id") == solution_id:
+                    selected_solution = sol
+                    break
+            if not selected_solution:
+                return {"success": False, "error": f"Invalid solution_id: {solution_id!r}"}
+
+        if selected_action:
+            action_found = False
+            for sol in recommended_solutions:
+                if sol.get("action") == selected_action:
+                    action_found = True
+                    if not selected_solution:
+                        selected_solution = sol
+                    break
+            if not action_found:
+                return {"success": False, "error": f"Invalid selected_action: {selected_action!r}"}
+
+        if selected_solution and solution_id and selected_action:
+            if selected_solution.get("action") != selected_action:
+                return {"success": False, "error": f"Mismatch: solution_id {solution_id!r} has action {selected_solution.get('action')!r}, but selected_action is {selected_action!r}."}
+
+        if not selected_solution:
+            selected_solution = recommended_solutions[0]
+        if not selected_action:
+            selected_action = selected_solution.get("action", suggested_action)
+
+        if selected_action not in VALID_SUGGESTED_ACTIONS:
+            return {"success": False, "error": f"Invalid selected_action: {selected_action!r}. Must be one of {VALID_SUGGESTED_ACTIONS}."}
+
+        final_solution_id = selected_solution.get("id", "sol-1")
+        now = datetime.now(timezone.utc).isoformat()
+
+        # Conditional write
         try:
-            resp = ssm.get_parameter(Name=secret_param, WithDecryption=True)
-            secret = resp["Parameter"]["Value"]
-        except ClientError:
-            return {"success": False, "error": "Approval secret not configured in SSM"}
+            table.update_item(
+                Key={"incident_id": incident_id},
+                UpdateExpression=(
+                    "SET remediation.#st = :approved, "
+                    "remediation.decided_at = :now, "
+                    "remediation.selected_action = :sel_action, "
+                    "remediation.selected_solution_id = :sel_id, "
+                    "remediation.approved_via = :via"
+                ),
+                ConditionExpression=(
+                    "attribute_exists(incident_id) AND remediation.#st = :pending"
+                ),
+                ExpressionAttributeNames={"#st": "status"},
+                ExpressionAttributeValues={
+                    ":approved": "approved",
+                    ":pending": "pending_approval",
+                    ":now": now,
+                    ":sel_action": selected_action,
+                    ":sel_id": final_solution_id,
+                    ":via": "demo",
+                },
+            )
+            logger.info("Approved incident %s via demo (solution_id=%s, action=%s)", incident_id, final_solution_id, selected_action)
+        except ClientError as exc:
+            if exc.response["Error"]["Code"] == "ConditionalCheckFailedException":
+                resp = table.get_item(Key={"incident_id": incident_id})
+                item = resp.get("Item")
+                if not item:
+                    return {"success": False, "error": f"Incident {incident_id!r} not found"}
+                current = item.get("remediation", {}).get("status", "unknown")
+                return {"success": False, "error": f"Cannot approve: incident is already in status '{current}'"}
+            raise
 
-        import hmac
-        import hashlib
-        signed = f"{incident_id}:approve"
-        token = hmac.new(secret.encode("utf-8"), signed.encode("utf-8"), hashlib.sha256).hexdigest()
+        # Fire remediation asynchronously
+        remediation_fn = os.environ.get("REMEDIATION_FUNCTION_NAME", "")
+        if remediation_fn:
+            try:
+                _lambda.invoke(
+                    FunctionName=remediation_fn,
+                    InvocationType="Event",
+                    Payload=json.dumps({"incident_id": incident_id}),
+                )
+                logger.info("Remediation invoked async for incident %s", incident_id)
+            except Exception as exc:
+                logger.warning("Failed to invoke remediation for %s: %s", incident_id, exc)
 
-        # Invoke approval handler with the token
-        invoke_payload = {
-            "incident_id": incident_id,
-            "action": "approve",
-            "token": token,
-        }
-        _lambda.invoke(
-            FunctionName=APPROVAL_FUNCTION_NAME,
-            InvocationType="RequestResponse",  # synchronous for demo
-            Payload=json.dumps(invoke_payload),
-        )
-        return {"success": True, "incident_id": incident_id}
+        return {"success": True, "incident_id": incident_id, "selected_action": selected_action, "selected_solution_id": final_solution_id}
 
     except ClientError as exc:
         logger.error(f"Approval failed: {exc}")
@@ -365,8 +507,17 @@ def lambda_handler(event: dict, context) -> dict:
                 logger.error(f"DynamoDB error: {exc}")
                 return _err("Failed to verify incident status", 500)
 
+        # Parse optional body for solution selection
+        body_raw = event.get("body") or "{}"
+        try:
+            body = json.loads(body_raw)
+        except json.JSONDecodeError:
+            body = {}
+        solution_id = body.get("solution_id")
+        selected_action = body.get("selected_action")
+
         # Approve the incident
-        result = _approve_incident(incident_id)
+        result = _approve_incident(incident_id, solution_id, selected_action)
         if not result.get("success"):
             return _err(result.get("error", "Approval failed"))
 

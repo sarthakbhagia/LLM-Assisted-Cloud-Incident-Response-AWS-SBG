@@ -7,6 +7,7 @@ export default defineConfig({
   server: {
     port: 3000,
     host: true,
+    strictPort: true,
     // Proxy API calls to the local backend (local_backend.py).
     // This avoids CORS issues and works regardless of VITE_API_BASE_URL.
     // When VITE_API_BASE_URL is set (e.g. for a deployed build), api.js uses

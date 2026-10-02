@@ -49,7 +49,7 @@ try:
     _sts = boto3.client("sts", region_name="ap-south-1")
     _account_id = _sts.get_caller_identity()["Account"]
 except Exception:
-    _account_id = "889081505756"
+    _account_id = os.environ.get("AWS_ACCOUNT_ID", "889081505756")
 
 os.environ.setdefault("DATA_LAKE_BUCKET", f"llm-incident-datalake-{_account_id}-dev")
 
@@ -368,6 +368,10 @@ def approve_incident(incident_id):
     Local-dev approve endpoint.
     1. Writes remediation.status = 'approved' to DynamoDB directly (no HMAC).
     2. Spawns a background thread that runs remediation -> verification.
+    3. Optional JSON body: { "solution_id": "...", "selected_action": "..." }
+       - Validates against the incident's recommended_solutions
+       - Persists remediation.selected_action, remediation.selected_solution_id,
+         remediation.decided_at, remediation.approved_via
 
     In production this is handled by the approval Lambda (HMAC token required).
     """
@@ -376,18 +380,99 @@ def approve_incident(incident_id):
     try:
         table = boto3.resource("dynamodb").Table(os.environ["INCIDENTS_TABLE"])
         from datetime import datetime, timezone
-        table.update_item(
-            Key={"incident_id": incident_id},
-            UpdateExpression="SET remediation.#st = :v, remediation.decided_at = :dt",
-            ExpressionAttributeNames={"#st": "status"},
-            ExpressionAttributeValues={
-                ":v": "approved",
-                ":dt": datetime.now(timezone.utc).isoformat(),
-            },
-        )
-        logger.info("[Approve] incident %s marked approved - launching pipeline thread", incident_id)
 
-        # Fire remediation pipeline in background (does not block the HTTP response).
+        # Fetch incident to get recommended_solutions for validation
+        resp = table.get_item(Key={"incident_id": incident_id})
+        item = resp.get("Item")
+        if not item:
+            return _json_resp(error=f"Incident {incident_id!r} not found", status=404)
+
+        diagnosis = item.get("diagnosis", {})
+        recommended_solutions = diagnosis.get("recommended_solutions")
+        fault_class = item.get("fault_class", "unknown")
+        suggested_action = diagnosis.get("suggested_action", "manual_review_required")
+
+        if not recommended_solutions:
+            # Derive using same logic
+            recommended_solutions = _derive_approve_solutions_local(suggested_action, fault_class)
+
+        # Parse optional body
+        body = request.get_json(silent=True) or {}
+        solution_id = body.get("solution_id")
+        selected_action = body.get("selected_action")
+
+        selected_solution = None
+
+        if solution_id:
+            for sol in recommended_solutions:
+                if sol.get("id") == solution_id:
+                    selected_solution = sol
+                    break
+            if not selected_solution:
+                return _json_resp(error=f"Invalid solution_id: {solution_id!r}", status=400)
+
+        if selected_action:
+            action_found = False
+            for sol in recommended_solutions:
+                if sol.get("action") == selected_action:
+                    action_found = True
+                    if not selected_solution:
+                        selected_solution = sol
+                    break
+            if not action_found:
+                return _json_resp(error=f"Invalid selected_action: {selected_action!r}", status=400)
+
+        if selected_solution and solution_id and selected_action:
+            if selected_solution.get("action") != selected_action:
+                return _json_resp(error=f"Mismatch: solution_id {solution_id!r} has action {selected_solution.get('action')!r}, but selected_action is {selected_action!r}.", status=400)
+
+        if not selected_solution:
+            selected_solution = recommended_solutions[0]
+        if not selected_action:
+            selected_action = selected_solution.get("action", suggested_action)
+
+        if selected_action not in ["scale_up", "restart_service", "lock_s3_bucket", "tighten_iam_policy", "restart_downstream_service", "manual_review_required"]:
+            return _json_resp(error=f"Invalid action: {selected_action!r}", status=400)
+
+        solution_id = selected_solution.get("id", "sol-1")
+        now = datetime.now(timezone.utc).isoformat()
+
+        # Conditional write
+        try:
+            table.update_item(
+                Key={"incident_id": incident_id},
+                UpdateExpression=(
+                    "SET remediation.#st = :approved, "
+                    "remediation.decided_at = :now, "
+                    "remediation.selected_action = :sel_action, "
+                    "remediation.selected_solution_id = :sel_id, "
+                    "remediation.approved_via = :via"
+                ),
+                ConditionExpression=(
+                    "attribute_exists(incident_id) AND remediation.#st = :pending"
+                ),
+                ExpressionAttributeNames={"#st": "status"},
+                ExpressionAttributeValues={
+                    ":approved": "approved",
+                    ":pending": "pending_approval",
+                    ":now": now,
+                    ":sel_action": selected_action,
+                    ":sel_id": solution_id,
+                    ":via": "dashboard",
+                },
+            )
+            logger.info("[Approve] incident %s marked approved (solution_id=%s, action=%s) - launching pipeline thread", incident_id, solution_id, selected_action)
+        except Exception as exc:
+            if "ConditionalCheckFailedException" in str(exc):
+                resp = table.get_item(Key={"incident_id": incident_id})
+                item = resp.get("Item")
+                if not item:
+                    return _json_resp(error=f"Incident {incident_id!r} not found", status=404)
+                current = item.get("remediation", {}).get("status", "unknown")
+                return _json_resp(error=f"Cannot approve: incident is already in status '{current}'", status=409)
+            raise
+
+        # Fire remediation pipeline in background
         t = threading.Thread(
             target=_run_remediation_pipeline,
             args=(incident_id,),
@@ -399,11 +484,77 @@ def approve_incident(incident_id):
         return _json_resp(data={
             "incident_id": incident_id,
             "status": "approved",
+            "selected_action": selected_action,
+            "selected_solution_id": solution_id,
             "pipeline": "remediation started in background",
         })
     except Exception as exc:
         traceback.print_exc()
         return _json_resp(error=str(exc), status=500)
+
+
+def _derive_approve_solutions_local(suggested_action: str, fault_class: str) -> list:
+    """
+    Derive recommended_solutions for approval validation (local backend version).
+    Uses the same deterministic logic as the diagnosis Lambda's fallback solutions.
+    """
+    fault_class_alternatives = {
+        "resource_exhaustion": [
+            {"action": "scale_up", "risk": "low", "source": "runbook"},
+            {"action": "restart_service", "risk": "medium", "source": "runbook"},
+            {"action": "manual_review_required", "risk": "low", "source": "runbook"},
+        ],
+        "misconfiguration": [
+            {"action": "lock_s3_bucket", "risk": "medium", "source": "runbook"},
+            {"action": "tighten_iam_policy", "risk": "medium", "source": "runbook"},
+            {"action": "manual_review_required", "risk": "low", "source": "runbook"},
+        ],
+        "service_cascade": [
+            {"action": "restart_downstream_service", "risk": "medium", "source": "runbook"},
+            {"action": "restart_service", "risk": "medium", "source": "runbook"},
+            {"action": "manual_review_required", "risk": "low", "source": "runbook"},
+        ],
+    }
+
+    alternatives = fault_class_alternatives.get(fault_class, [])
+    solutions = []
+    seen = set()
+
+    primary_solution = {
+        "id": "sol-1",
+        "action": suggested_action,
+        "title": suggested_action.replace("_", " ").title(),
+        "description": f"Apply {suggested_action.replace('_', ' ')} remediation per diagnosis",
+        "risk": "medium",
+        "expected_outcome": f"Resolve the incident via {suggested_action.replace('_', ' ')}",
+        "rationale": "Primary diagnosis suggested action",
+        "confidence": 0.9,
+        "source": "llm",
+    }
+    solutions.append(primary_solution)
+    seen.add(suggested_action)
+
+    for alt in alternatives:
+        action = alt["action"]
+        if action in seen:
+            continue
+        seen.add(action)
+
+        solutions.append({
+            "id": f"sol-{len(solutions)+1}",
+            "action": action,
+            "title": action.replace("_", " ").title(),
+            "description": f"Apply {action.replace('_', ' ')} remediation per runbook",
+            "risk": alt["risk"],
+            "expected_outcome": f"Resolve the {fault_class} incident via {action.replace('_', ' ')}",
+            "rationale": f"Runbook-prescribed alternative for {fault_class} fault class",
+            "confidence": 0.7,
+            "source": "runbook",
+        })
+        if len(solutions) >= 3:
+            break
+
+    return solutions
 
 
 @main_app.route("/api/incidents/<incident_id>/reject", methods=["POST", "OPTIONS"])

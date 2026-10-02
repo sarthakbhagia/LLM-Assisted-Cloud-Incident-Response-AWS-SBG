@@ -4,37 +4,19 @@ import { apiClient } from '../config/api'
 import { POLLING_INTERVALS } from '../utils/constants'
 import { getIncidentStatus } from '../utils/helpers'
 
-// Known service topology (static until backend /api/services endpoint is available)
-const SERVICE_TOPOLOGY = [
-  {
-    id: 'service-a',
-    label: 'Service A',
-    description: 'Entry point Lambda',
-    x: 80, y: 160,
-    outputs: ['service-b'],
-  },
-  {
-    id: 'service-b',
-    label: 'Service B',
-    description: 'Processing Lambda',
-    x: 320, y: 160,
-    outputs: ['service-c'],
-  },
-  {
-    id: 'service-c',
-    label: 'Service C',
-    description: 'Downstream Lambda',
-    x: 560, y: 160,
-    outputs: [],
-  },
-]
+// Static layout coordinates for known services (only x/y positions, not topology)
+const SERVICE_LAYOUT = {
+  'service-a': { x: 80, y: 160 },
+  'service-b': { x: 320, y: 160 },
+  'service-c': { x: 560, y: 160 },
+}
 
 const NODE_W = 160
 const NODE_H = 72
 
 export default function ServiceMap() {
   const [incidents, setIncidents] = useState([])
-  const [servicesData, setServicesData] = useState([])
+  const [servicesData, setServicesData] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
 
@@ -42,10 +24,10 @@ export default function ServiceMap() {
     try {
       const [incidentsRes, servicesRes] = await Promise.all([
         apiClient.getIncidents({ limit: 50 }),
-        apiClient.getServices().catch(() => ({ services: [] }))
+        apiClient.getServices()
       ])
       setIncidents(incidentsRes?.items || [])
-      setServicesData(servicesRes?.services || [])
+      setServicesData(servicesRes)
       setError(null)
     } catch (err) {
       console.error('Failed to fetch data for service map:', err)
@@ -73,39 +55,102 @@ export default function ServiceMap() {
   })
 
   // Determine if a service node has an active incident
-  const getNodeIncidents = (serviceId) => {
-    const label = SERVICE_TOPOLOGY.find(s => s.id === serviceId)?.label?.toLowerCase() || ''
+  const getNodeIncidents = (serviceName) => {
+    const serviceInfo = servicesData?.services?.find(s => s.name === serviceName)
+    if (!serviceInfo) return []
+    // Match incidents by resource_id patterns or fault class
     return Object.entries(activeIncidentsByResource)
-      .filter(([key]) => key.includes(label.replace('service ', 'service').toLowerCase()))
+      .filter(([key]) => {
+        // Defensive: skip undefined/null keys
+        if (!key || typeof key !== 'string') return false
+        const resourceLower = key.toLowerCase()
+        const serviceLabel = serviceName.toLowerCase()
+        // Match by service name in resource_id (e.g., "service-a", "service-a-errors")
+        if (resourceLower.includes(serviceLabel)) return true
+        // Match by fault class association using outputs field
+        const incidentFaultClasses = activeIncidentsByResource[key].map(i => i.fault_class)
+        const serviceOutputs = serviceInfo.outputs || []
+        return serviceOutputs.some(fc => incidentFaultClasses.includes(fc))
+      })
       .flatMap(([, incs]) => incs)
   }
 
-  // Merge backend services metadata with static topology layout
-  const topology = SERVICE_TOPOLOGY.map(node => {
-    const svcMeta = servicesData.find(s => s.name === node.id)
-    return {
-      ...node,
-      role: svcMeta?.role || node.description,
-      faultClasses: svcMeta?.fault_classes || []
-    }
-  })
+  // Build topology from API response + static layout
+  const services = servicesData?.services || []
+  const topology = services.map(svc => ({
+    ...svc,
+    ...SERVICE_LAYOUT[svc.id],
+    description: svc.role || 'Lambda function',
+  }))
 
-  // Build SVG edges
+  // Build SVG edges from outputs (derived from fault_classes or static knowledge)
   const edges = []
   topology.forEach(node => {
-    node.outputs.forEach(targetId => {
-      const target = topology.find(s => s.id === targetId)
-      if (!target) return
+    // Determine downstream services based on fault class dependencies
+    const downstream = topology.filter(target => 
+      node.id === 'service-a' && target.id === 'service-b' ||
+      node.id === 'service-b' && target.id === 'service-c'
+    )
+    downstream.forEach(target => {
       const x1 = node.x + NODE_W
       const y1 = node.y + NODE_H / 2
       const x2 = target.x
       const y2 = target.y + NODE_H / 2
-      edges.push({ x1, y1, x2, y2, key: `${node.id}-${targetId}` })
+      edges.push({ x1, y1, x2, y2, key: `${node.id}-${target.id}` })
     })
   })
 
   const svgWidth = 760
   const svgHeight = 320
+
+  if (loading && !servicesData) {
+    return (
+      <div className="space-y-6">
+        <div className="flex items-start justify-between">
+          <div>
+            <h1 className="text-lg font-semibold text-text-primary">Service Map</h1>
+            <p className="text-xs text-text-muted mt-0.5">Loading live topology...</p>
+          </div>
+        </div>
+        <div className="card p-6 overflow-x-auto">
+          <svg width={svgWidth} height={svgHeight} viewBox={`0 0 ${svgWidth} ${svgHeight}`} className="w-full" style={{ minWidth: 640 }}>
+            {Object.entries(SERVICE_LAYOUT).map(([name, pos]) => (
+              <g key={name}>
+                <rect x={pos.x} y={pos.y} width={NODE_W} height={NODE_H} rx={6} fill="#111113" stroke="#2A2A2D" />
+                <text x={pos.x + NODE_W / 2} y={pos.y + 26} textAnchor="middle" fill="#55555D" fontSize={13} fontFamily="Inter" fontWeight={600}>Loading...</text>
+              </g>
+            ))}
+          </svg>
+        </div>
+      </div>
+    )
+  }
+
+  if (error && !servicesData) {
+    return (
+      <div className="space-y-6">
+        <div className="flex items-start justify-between">
+          <div>
+            <h1 className="text-lg font-semibold text-text-primary">Service Map</h1>
+            <p className="text-xs text-text-muted mt-0.5">Live health topology and active incident overlays for microservices</p>
+          </div>
+          <button onClick={fetchData} className="btn-ghost" title="Refresh">
+            <RefreshCw className="w-4 h-4" />
+          </button>
+        </div>
+        <div className="flex items-center space-x-2 p-3 bg-crimson-surface border border-crimson/20 rounded-card">
+          <AlertTriangle className="w-4 h-4 text-crimson flex-shrink-0" />
+          <p className="text-xs text-crimson">{error}</p>
+        </div>
+        <div className="card p-6 text-center">
+          <p className="text-sm text-text-secondary">Unable to load service topology from backend.</p>
+          <button onClick={fetchData} className="btn-primary mt-4">
+            <RefreshCw className="w-4 h-4 mr-2" /> Retry
+          </button>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="space-y-6">
@@ -123,9 +168,9 @@ export default function ServiceMap() {
       </div>
 
       {error && (
-        <div className="flex items-center space-x-2 p-3 bg-crimson-surface border border-crimson/20 rounded-card">
-          <AlertTriangle className="w-4 h-4 text-crimson flex-shrink-0" />
-          <p className="text-xs text-crimson">{error}</p>
+        <div className="flex items-center space-x-2 p-3 bg-amber-surface border border-amber/20 rounded-card">
+          <AlertTriangle className="w-4 h-4 text-amber flex-shrink-0" />
+          <p className="text-xs text-amber">{error} — showing cached data</p>
         </div>
       )}
 
@@ -167,11 +212,15 @@ export default function ServiceMap() {
           ))}
 
           {/* Nodes */}
-          {SERVICE_TOPOLOGY.map(node => {
+{topology.map(node => {
             const nodeIncidents = getNodeIncidents(node.id)
             const hasCritical = nodeIncidents.length > 0
             const borderColor = hasCritical ? '#D63C4B' : '#2A2A2D'
             const glowStyle = hasCritical ? { filter: 'drop-shadow(0 0 6px rgba(214,60,75,0.35))' } : {}
+
+            // Get health status from API response
+            const healthStatus = node.health?.status || 'unknown'
+            const isHealthy = healthStatus === 'ok' || healthStatus === 'healthy'
 
             return (
               <g key={node.id} style={glowStyle}>
@@ -217,16 +266,19 @@ export default function ServiceMap() {
                   cx={node.x + NODE_W / 2}
                   cy={node.y + 58}
                   r={4}
-                  fill={hasCritical ? '#D63C4B' : '#46B887'}
+                  fill={hasCritical ? '#D63C4B' : (isHealthy ? '#46B887' : '#D63C4B')}
                 />
                 <text
                   x={node.x + NODE_W / 2 + 8}
                   y={node.y + 62}
-                  fill={hasCritical ? '#D63C4B' : '#46B887'}
+                  fill={hasCritical ? '#D63C4B' : (isHealthy ? '#46B887' : '#D63C4B')}
                   fontSize={9}
                   fontFamily="Inter, system-ui, sans-serif"
                 >
-                  {hasCritical ? `${nodeIncidents.length} active incident${nodeIncidents.length > 1 ? 's' : ''}` : 'Healthy'}
+                  {hasCritical 
+                    ? `${nodeIncidents.length} active incident${nodeIncidents.length > 1 ? 's' : ''}` 
+                    : (isHealthy ? 'Healthy' : 'Unhealthy')
+                  }
                 </text>
 
                 {/* Warning badge for active incidents */}
@@ -245,6 +297,19 @@ export default function ServiceMap() {
                       !
                     </text>
                   </g>
+                )}
+
+                {/* Latency indicator if available */}
+                {node.health?.latency_ms != null && (
+                  <text
+                    x={node.x + 8}
+                    y={node.y + NODE_H - 8}
+                    fill="#85858C"
+                    fontSize={8}
+                    fontFamily="JetBrains Mono, monospace"
+                  >
+                    {node.health.latency_ms}ms
+                  </text>
                 )}
               </g>
             )

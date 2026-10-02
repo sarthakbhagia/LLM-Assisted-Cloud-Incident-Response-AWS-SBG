@@ -2,13 +2,26 @@
 // In local dev: leave VITE_API_BASE_URL unset. The Vite dev server proxy
 // (vite.config.js server.proxy) routes /api/* to localhost:3001 automatically.
 // In production: set VITE_API_BASE_URL to your API Gateway Prod stage URL, e.g.:
-//   VITE_API_BASE_URL=https://o212lf1md4.execute-api.ap-south-1.amazonaws.com/Prod
-//   VITE_DEMO_API_BASE_URL=https://0l32vjl4n8.execute-api.ap-south-1.amazonaws.com/Prod
+//   VITE_API_BASE_URL=https://<api-id>.execute-api.<region>.amazonaws.com/Prod
+//   VITE_DEMO_API_BASE_URL=https://<demo-api-id>.execute-api.<region>.amazonaws.com/Prod
 // Local dev: leave VITE_API_BASE_URL unset. Empty string means relative URLs,
 // which Vite's dev server proxy routes to localhost:3001 (see vite.config.js).
 // Production: set VITE_API_BASE_URL=https://<api-id>.execute-api.<region>.amazonaws.com/Prod
-export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || ''
-export const DEMO_API_BASE_URL = import.meta.env.VITE_DEMO_API_BASE_URL || ''
+// 
+// IMPORTANT: In production builds, VITE_API_BASE_URL and VITE_DEMO_API_BASE_URL MUST be set.
+// If empty in production mode, a config error screen will be shown.
+
+const isProduction = import.meta.env.PROD
+const apiBaseUrl = import.meta.env.VITE_API_BASE_URL
+const demoApiBaseUrl = import.meta.env.VITE_DEMO_API_BASE_URL
+
+if (isProduction && (!apiBaseUrl || !demoApiBaseUrl)) {
+  // This will be caught by the ConfigError boundary in main.jsx
+  console.error('[Config] Missing required VITE_API_BASE_URL or VITE_DEMO_API_BASE_URL in production')
+}
+
+export const API_BASE_URL = apiBaseUrl || ''
+export const DEMO_API_BASE_URL = demoApiBaseUrl || ''
 
 export const API_ENDPOINTS = {
   INCIDENTS: '/api/incidents',
@@ -28,6 +41,19 @@ export const API_ENDPOINTS = {
 export const DEMO_ENDPOINTS = {
   INJECT: '/demo/inject',
   APPROVE: (id) => `/demo/approve/${id}`
+}
+
+// Config error state for production builds with missing env vars
+export let configError = null
+if (isProduction && (!apiBaseUrl || !demoApiBaseUrl)) {
+  configError = {
+    message: 'Missing required environment variables',
+    details: [
+      !apiBaseUrl && 'VITE_API_BASE_URL is not set',
+      !demoApiBaseUrl && 'VITE_DEMO_API_BASE_URL is not set',
+    ].filter(Boolean),
+    help: 'Set VITE_API_BASE_URL and VITE_DEMO_API_BASE_URL in your production environment (e.g., from CloudFormation stack outputs). See infra/template.yaml outputs DashboardApiUrl and DemoControlApiUrl.'
+  }
 }
 
 // API client with error handling
@@ -64,8 +90,8 @@ class ApiClient {
       }
 
       // Unwrap the backend envelope { data: ..., error: ... }
-      // The demo control API does NOT use this envelope — skip unwrap for those
-      if (!useDemoURL && json !== null && typeof json === 'object' && 'data' in json) {
+      // Both main API and demo API use this envelope format
+      if (json !== null && typeof json === 'object' && 'data' in json) {
         if (json.error) throw new Error(json.error)
         return json.data
       }

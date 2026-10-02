@@ -72,6 +72,7 @@ Thumbs.db
 # Logs and temp files
 # -----------------------------------------------------------------------
 *.log
+nohup.out
 logs/
 .evaluation_tmp/
 .freebuff/

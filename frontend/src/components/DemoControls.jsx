@@ -1,68 +1,16 @@
 import { useState, useEffect, useCallback } from 'react'
 import { AlertCircle, Server, Database, Share2, Loader2, CheckCircle, XCircle, Info, Shield } from 'lucide-react'
 import { apiClient } from '../config/api'
-
-// Plain-language fault class configurations
-const FAULT_CLASSES = [
-  {
-    id: 'resource_exhaustion',
-    label: 'Overload a Server',
-    description: 'We\'ll spike CPU on one of our demo services until it trips an alarm.',
-    icon: Server,
-    color: 'text-crimson',
-    bgColor: 'bg-crimson/10 border-crimson/20',
-    actionLabel: 'Break it',
-  },
-  {
-    id: 'misconfiguration',
-    label: 'Leave a Storage Bucket Open to the Internet',
-    description: 'We\'ll remove the public access block on a demo S3 bucket to simulate a misconfiguration.',
-    icon: Database,
-    color: 'text-amber',
-    bgColor: 'bg-amber/10 border-amber/20',
-    actionLabel: 'Expose it',
-  },
-  {
-    id: 'service_cascade',
-    label: 'Crash a Service and Watch it Break its Neighbors',
-    description: 'We\'ll kill a downstream service to trigger cascading failures upstream.',
-    icon: Share2,
-    color: 'text-emerald',
-    bgColor: 'bg-emerald/10 border-emerald/20',
-    actionLabel: 'Trigger cascade',
-  },
-]
-
-// Pipeline stages for the tracker
-const PIPELINE_STAGES = [
-  { key: 'detected', label: 'Detected', caption: 'An alarm fired — something unusual was detected in the cloud.' },
-  { key: 'collecting', label: 'Collecting Data', caption: 'Gathering logs, metrics, and traces from the affected services.' },
-  { key: 'diagnosing', label: 'Diagnosing', caption: 'An AI model is reading the incident data and a runbook to figure out what went wrong.' },
-  { key: 'pending_approval', label: 'Awaiting Approval', caption: 'The AI has a recommended fix. A human needs to approve it before anything changes in AWS.' },
-  { key: 'remediating', label: 'Remediating', caption: 'Executing the approved fix — restarting a service, scaling up, or locking a bucket.' },
-  { key: 'verifying', label: 'Verifying', caption: 'Re-checking the same alarm/metric that caught the problem, to confirm the fix actually worked.' },
-  { key: 'resolved', label: 'Resolved', caption: 'The signal is back to normal. Incident closed.' },
-]
-
-// Map remediation/verification status to pipeline stage
-const STATUS_TO_STAGE = {
-  // Collector statuses
-  detected: 0,
-  // Diagnosis statuses
-  diagnosing: 2,
-  // Approval statuses
-  pending_approval: 3,
-  approved: 4,
-  // Remediation statuses
-  remediating: 4,
-  executed: 5,
-  failed: 5,
-  // Verification statuses
-  verifying: 5,
-  resolved: 6,
-  not_resolved: 6,
-  inconclusive: 6,
-}
+import { 
+  FAULT_CLASSES, 
+  FAULT_CLASS_LABELS, 
+  FAULT_CLASS_DESCRIPTIONS, 
+  FAULT_CLASS_SEVERITY, 
+  FAULT_CLASS_ICONS,
+  DEMO_ACTION_LABELS,
+  PIPELINE_STAGE_DETAILS,
+  PIPELINE_STAGES,
+} from '../utils/constants'
 
 export default function DemoControls() {
   const [activeIncident, setActiveIncident] = useState(null)
@@ -183,37 +131,53 @@ export default function DemoControls() {
         </p>
 
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-          {FAULT_CLASSES.map((fault) => {
-            const Icon = fault.icon
+          {Object.entries(FAULT_CLASSES).map(([key, faultClass]) => {
+            const Icon = FAULT_CLASS_ICONS[faultClass] ? null : (key === 'resource_exhaustion' ? Server : key === 'misconfiguration' ? Database : Share2)
+            const severity = FAULT_CLASS_SEVERITY[faultClass] || { label: 'Unknown', className: 'badge-info' }
+            const description = FAULT_CLASS_DESCRIPTIONS[faultClass] || ''
+            const actionLabel = DEMO_ACTION_LABELS[faultClass] || 'Inject'
             const isDisabled = loading || activeIncident
+            
+            // Determine color from severity
+            const colorClass = severity.className.replace('badge-', 'text-')
+            const bgColorClass = severity.className.replace('badge-', 'bg-').replace('critical', 'crimson/10').replace('warning', 'amber/10').replace('info', 'emerald/10')
+            const borderColorClass = severity.className.replace('badge-', 'border-').replace('critical', 'crimson/20').replace('warning', 'amber/20').replace('info', 'emerald/20')
+            
             return (
               <div
-                key={fault.id}
-                onClick={() => !isDisabled && handleInjectFault(fault.id)}
-                className={`card p-5 relative ${fault.bgColor} ${isDisabled ? 'opacity-50 cursor-not-allowed' : 'hover:border-border-strong hover:bg-opacity-20 cursor-pointer'} transition-all group`}
+                key={faultClass}
+                onClick={() => !isDisabled && handleInjectFault(faultClass)}
+                className={`card p-5 relative ${bgColorClass} ${borderColorClass} ${isDisabled ? 'opacity-50 cursor-not-allowed' : 'hover:border-border-strong hover:bg-opacity-20 cursor-pointer'} transition-all group`}
               >
                 <div className="flex items-center space-x-3 mb-3">
-                  <div className={`p-3 rounded-lg ${fault.color} bg-opacity-10`}>
-                    <Icon className="w-6 h-6" />
-                  </div>
+                  {Icon && (
+                    <div className={`p-3 rounded-lg ${colorClass} bg-opacity-10`}>
+                      <Icon className="w-6 h-6" />
+                    </div>
+                  )}
+                  {FAULT_CLASS_ICONS[faultClass] && (
+                    <div className="p-3 rounded-lg bg-bg-elevated">
+                      <span className="text-2xl" role="img" aria-label={FAULT_CLASS_LABELS[faultClass]}>{FAULT_CLASS_ICONS[faultClass]}</span>
+                    </div>
+                  )}
                 </div>
-                <h3 className="text-base font-semibold text-text-primary mb-1">{fault.label}</h3>
-                <p className="text-xs text-text-secondary mb-4 flex-1">{fault.description}</p>
+                <h3 className="text-base font-semibold text-text-primary mb-1">{FAULT_CLASS_LABELS[faultClass]}</h3>
+                <p className="text-xs text-text-secondary mb-4 flex-1">{description}</p>
                 <button
                   onClick={(e) => {
                     e.stopPropagation()
-                    if (!isDisabled) handleInjectFault(fault.id)
+                    if (!isDisabled) handleInjectFault(faultClass)
                   }}
                   disabled={isDisabled}
                   className="w-full btn-primary text-sm disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  {loading && activeIncident?.fault_class === fault.id ? (
+                  {loading && activeIncident?.fault_class === faultClass ? (
                     <>
                       <Loader2 className="w-4 h-4 animate-spin mr-2" />
                       Injecting...
                     </>
                   ) : (
-                    fault.actionLabel
+                    actionLabel
                   )}
                 </button>
                 {isDisabled && activeIncident && (
@@ -249,11 +213,9 @@ export default function DemoControls() {
 }
 
 function PipelineTracker({ incident, currentStage, stages, onApprove, isApproving }) {
-  const faultClassLabel = {
-    resource_exhaustion: 'Resource Exhaustion',
-    misconfiguration: 'Misconfiguration',
-    service_cascade: 'Service Cascade',
-  }[incident.fault_class] || incident.fault_class
+  const faultClassLabel = FAULT_CLASS_LABELS[incident.fault_class] || incident.fault_class
+  // Use shared pipeline stage details from constants
+  const stageDetails = PIPELINE_STAGE_DETAILS
 
   return (
     <div className="card p-6">
@@ -277,8 +239,8 @@ function PipelineTracker({ incident, currentStage, stages, onApprove, isApprovin
 
       {/* Horizontal Stepper */}
       <div className="overflow-x-auto">
-        <div className="flex items-start min-w-max" style={{ minWidth: stages.length * 180 }}>
-          {stages.map((stage, index) => {
+        <div className="flex items-start min-w-max" style={{ minWidth: stageDetails.length * 180 }}>
+          {stageDetails.map((stage, index) => {
             const isComplete = index < currentStage
             const isCurrent = index === currentStage
             const isFuture = index > currentStage
@@ -303,7 +265,7 @@ function PipelineTracker({ incident, currentStage, stages, onApprove, isApprovin
                   </div>
                   
                   {/* Connector line */}
-                  {index < stages.length - 1 && (
+                  {index < stageDetails.length - 1 && (
                     <div className={`w-px h-16 mt-2 ${
                       isComplete || isCurrent ? 'bg-emerald' : 'bg-border-subtle'
                     }`} />
@@ -326,12 +288,12 @@ function PipelineTracker({ incident, currentStage, stages, onApprove, isApprovin
       </div>
 
       {/* Current Stage Detail */}
-      {currentStage < stages.length && (
+      {currentStage < stageDetails.length && (
         <div className="mt-6 p-4 bg-bg-elevated rounded-card border border-border-subtle">
           <h4 className="text-sm font-medium text-text-primary mb-2">
-            Current Stage: {stages[currentStage].label}
+            Current Stage: {stageDetails[currentStage].label}
           </h4>
-          <p className="text-sm text-text-secondary">{stages[currentStage].caption}</p>
+          <p className="text-sm text-text-secondary">{stageDetails[currentStage].caption}</p>
           
           {currentStage === 3 && (
             <div className="mt-4 p-3 bg-amber/10 border border-amber/20 rounded-card">

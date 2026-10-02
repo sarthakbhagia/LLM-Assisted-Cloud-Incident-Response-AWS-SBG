@@ -6,14 +6,15 @@ import {
   Settings, Shield, AlertTriangle
 } from 'lucide-react'
 
-const SERVICE_META = {
-  sts_credentials:    { label: 'AWS Identity (STS)',      icon: Shield,        description: 'IAM credentials and assumed role' },
-  dynamodb_table:     { label: 'DynamoDB Table',          icon: Database,      description: 'Incidents data store' },
-  s3_bucket:          { label: 'S3 Data Lake',            icon: Cloud,         description: 'Evidence and analytics storage' },
-  bedrock_runtime:    { label: 'Bedrock LLM',             icon: BrainCircuit,  description: 'Nova Micro model (ping test)' },
-  cloudwatch_alarms:  { label: 'CloudWatch Alarms',       icon: Activity,      description: 'Alarm detection source' },
-  lambda_functions:   { label: 'Lambda Functions',        icon: Zap,           description: 'Pipeline execution runtime' },
-  ssm_parameters:     { label: 'SSM Parameter Store',     icon: Settings,      description: 'Secrets and config (non-critical)' },
+// Icons for service types - only icons/labels kept in UI, descriptions from API
+const SERVICE_ICONS = {
+  sts_credentials: Shield,
+  dynamodb_table: Database,
+  s3_bucket: Cloud,
+  bedrock_runtime: BrainCircuit,
+  cloudwatch_alarms: Activity,
+  lambda_functions: Zap,
+  ssm_parameters: Settings,
 }
 
 const HANDLER_META = {
@@ -60,9 +61,10 @@ function LatencyBar({ ms, max = 3000 }) {
 }
 
 function ServiceRow({ svc }) {
-  const meta = SERVICE_META[svc.service] || { label: svc.service, icon: Server, description: '' }
-  const Icon = meta.icon
+  const Icon = SERVICE_ICONS[svc.service] || Server
   const isOk = svc.status === 'ok'
+  // Use detail from API as description, fallback to service name
+  const description = svc.detail || `${svc.service} health check`
 
   return (
     <div className={`
@@ -81,13 +83,13 @@ function ServiceRow({ svc }) {
 
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2 mb-0.5">
-          <span className="text-sm font-medium text-text-primary">{meta.label}</span>
+          <span className="text-sm font-medium text-text-primary">{svc.service}</span>
           {!svc.critical && (
             <span className="text-xs text-text-muted bg-bg-elevated px-1.5 py-0.5 rounded">non-critical</span>
           )}
           <StatusDot status={svc.status} />
         </div>
-        <p className="text-xs text-text-muted mb-1">{meta.description}</p>
+        <p className="text-xs text-text-muted mb-1">{description}</p>
         {svc.detail && (
           <p className={`text-xs font-mono break-all ${isOk ? 'text-text-secondary' : 'text-crimson'}`}>
             {svc.detail}
@@ -303,10 +305,13 @@ export default function SystemHealth() {
               </thead>
               <tbody>
                 {health.services.map((svc, i) => {
-                  const meta = SERVICE_META[svc.service]
+                  const Icon = SERVICE_ICONS[svc.service] || Server
                   return (
                     <tr key={svc.service} className={`border-b border-border-subtle ${i % 2 === 0 ? 'bg-bg-surface' : 'bg-bg-base'}`}>
-                      <td className="px-4 py-2 font-medium text-text-primary">{meta?.label || svc.service}</td>
+                      <td className="px-4 py-2 font-medium text-text-primary flex items-center gap-2">
+                        <Icon className="w-4 h-4 text-text-secondary" />
+                        {svc.service}
+                      </td>
                       <td className="px-4 py-2">
                         <span className={`badge ${svc.status === 'ok' ? 'badge-success' : 'badge-critical'}`}>
                           {svc.status}

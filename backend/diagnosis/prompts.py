@@ -27,14 +27,33 @@ You MUST respond with a SINGLE valid JSON object adhering EXACTLY to this JSON s
   "affected_resources": ["string — list of affected AWS resource names or ARNs"],
   "suggested_action": "one of: scale_up | restart_service | lock_s3_bucket | tighten_iam_policy | restart_downstream_service | manual_review_required",
   "explanation": "string — plain-English incident summary suitable for Slack incident report",
-  "reasoning_trace": "string — step-by-step diagnostic reasoning trace for audit log"
+  "reasoning_trace": "string — step-by-step diagnostic reasoning trace for audit log",
+  "recommended_solutions": [
+    {
+      "id": "string — unique solution identifier (e.g., sol-1, sol-2)",
+      "action": "one of: scale_up | restart_service | lock_s3_bucket | tighten_iam_policy | restart_downstream_service | manual_review_required",
+      "title": "string — short human-readable title",
+      "description": "string — detailed description of the remediation action",
+      "risk": "low | medium | high",
+      "expected_outcome": "string — expected result after applying this solution",
+      "rationale": "string — why this solution addresses the root cause",
+      "confidence": 0.95,
+      "source": "llm | runbook"
+    }
+  ]
 }
 
 RULES:
 1. `suggested_action` MUST be EXACTLY one of: "scale_up", "restart_service", "lock_s3_bucket", "tighten_iam_policy", "restart_downstream_service", "manual_review_required".
 2. `confidence` MUST be a float between 0.0 and 1.0.
 3. `affected_resources` MUST be a JSON array of strings.
-4. Output ONLY the JSON object.
+4. `recommended_solutions` MUST be an array of 2-3 objects, each with the exact fields above.
+5. `recommended_solutions[0].action` MUST equal `suggested_action`.
+6. Each solution's `action` MUST be exactly one of: "scale_up", "restart_service", "lock_s3_bucket", "tighten_iam_policy", "restart_downstream_service", "manual_review_required".
+7. Each solution's `risk` MUST be exactly one of: "low", "medium", "high".
+8. Each solution's `source` MUST be exactly one of: "llm", "runbook".
+9. Each solution's `confidence` MUST be a float between 0.0 and 1.0.
+10. Output ONLY the JSON object.
 """
 
 
@@ -67,7 +86,21 @@ def build_diagnosis_prompt(raw_data: dict, runbook_text: str | None = None) -> s
             "Note: No runbook context is provided (ablated mode). Use your intrinsic AWS cloud knowledge to diagnose the incident.",
         ])
 
-    prompt_parts.append("\nGenerate the JSON diagnosis response now:")
+    prompt_parts.extend([
+        "",
+        "Generate the JSON diagnosis response now. The response MUST include a 'recommended_solutions' array with 2-3 solution objects, each containing:",
+        "  - id: unique solution identifier (e.g., sol-1, sol-2)",
+        "  - action: must be one of: scale_up, restart_service, lock_s3_bucket, tighten_iam_policy, restart_downstream_service, manual_review_required",
+        "  - title: short human-readable title",
+        "  - description: detailed description of the remediation action",
+        "  - risk: must be exactly one of: low, medium, high",
+        "  - expected_outcome: expected result after applying this solution",
+        "  - rationale: why this solution addresses the root cause",
+        "  - confidence: number between 0.0 and 1.0",
+        "  - source: must be exactly 'llm' or 'runbook'",
+        "",
+        "The first solution in recommended_solutions MUST have its 'action' field equal to the top-level 'suggested_action' field.",
+    ])
     return "\n".join(prompt_parts)
 
 

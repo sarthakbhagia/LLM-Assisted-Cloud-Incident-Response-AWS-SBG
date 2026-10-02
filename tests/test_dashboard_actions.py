@@ -11,9 +11,9 @@ from botocore.exceptions import ClientError
 
 # Set default env vars for tests if not present
 os.environ.setdefault("INCIDENTS_TABLE", "incidents-dev")
-os.environ.setdefault("DATA_LAKE_BUCKET", "llm-incident-datalake-889081505756-dev")
-os.environ.setdefault("DIAGNOSIS_FUNCTION_NAME", "llm-incident-response-dev-DiagnosisFunction")
-os.environ.setdefault("REMEDIATION_FUNCTION_NAME", "llm-incident-response-dev-RemediationFunction")
+os.environ.setdefault("DATA_LAKE_BUCKET", "llm-incident-datalake-test-account-dev")
+os.environ.setdefault("DIAGNOSIS_FUNCTION_NAME", "test-DiagnosisFunction")
+os.environ.setdefault("REMEDIATION_FUNCTION_NAME", "test-RemediationFunction")
 
 from backend.dashboard_api import dashboard_actions_lambda
 
@@ -47,6 +47,18 @@ def test_options_preflight():
 
 def test_approve_incident_success(mock_dynamodb, mock_lambda):
     mock_dynamodb.update_item.return_value = {}
+    # Mock get_item to return incident with diagnosis for recommended_solutions derivation
+    mock_dynamodb.get_item.return_value = {
+        "Item": {
+            "incident_id": "inc-123",
+            "fault_class": "resource_exhaustion",
+            "diagnosis": {
+                "suggested_action": "scale_up",
+                "confidence": 0.9,
+            },
+            "remediation": {"status": "pending_approval"},
+        }
+    }
 
     event = {
         "httpMethod": "POST",
@@ -59,10 +71,13 @@ def test_approve_incident_success(mock_dynamodb, mock_lambda):
     body = json.loads(response["body"])
     assert body["data"]["status"] == "approved"
     assert body["data"]["incident_id"] == "inc-123"
+    assert body["data"]["selected_action"] == "scale_up"
+    assert body["data"]["selected_solution_id"] == "sol-1"
 
+    assert mock_dynamodb.get_item.called
     mock_dynamodb.update_item.assert_called_once()
     mock_lambda.invoke.assert_called_once_with(
-        FunctionName="llm-incident-response-dev-RemediationFunction",
+        FunctionName="test-RemediationFunction",
         InvocationType="Event",
         Payload=json.dumps({"incident_id": "inc-123"}),
     )
@@ -121,7 +136,7 @@ def test_diagnose_incident_success(mock_dynamodb, mock_lambda):
     response = dashboard_actions_lambda.lambda_handler(event, {})
     assert response["statusCode"] == 202
     mock_lambda.invoke.assert_called_once_with(
-        FunctionName="llm-incident-response-dev-DiagnosisFunction",
+        FunctionName="test-DiagnosisFunction",
         InvocationType="Event",
         Payload=json.dumps({
             "incident_id": "inc-123",
