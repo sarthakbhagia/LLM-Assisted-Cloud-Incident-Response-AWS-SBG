@@ -73,7 +73,7 @@ think of it as renting computers and utilities instead of buying your own.
 | **AWS Config** | Constantly checks your resources against rules (e.g. "is this bucket public?"). | Detects **misconfiguration** incidents like exposed buckets. |
 | **GuardDuty** | A security service that watches for unusual/malicious behavior. | A second detector for security-related incidents. |
 | **X-Ray** | A tracing service that shows how requests move between services. | Gives us the "who called whom" evidence for **cascade** failures. |
-| **Amazon Bedrock** | A service that lets you use AI models (like Claude) without hosting them yourself. | This is the "brain" that reads incident data and diagnoses root cause. |
+| **Amazon Bedrock** | A service that lets you use AI models (like Nova Pro, Llama 3 70B, Mistral Large) without hosting them yourself. | This is the "brain" that reads incident data and diagnoses root cause. |
 | **Runbook context injection** | Loads our 3 runbook files and injects the matching one into the prompt as plain text (no vector store needed for a 3-file corpus). | Lets the AI fix problems the same way a human runbook would, with zero extra AWS cost. |
 | **SNS** | Amazon's notification service — sends messages to emails, Slack, etc. | Routes our report to Slack. |
 | **Slack webhook** | A URL that lets an app post messages directly into a Slack channel. | Where humans read the diagnosis and click approve/reject. |
@@ -100,7 +100,10 @@ LLM-Assisted-Cloud-Incident-Response-AWS-SBG/
 │   │   ├── remediation_lambda.py
 │   │   └── actions.py
 │   ├── verification/verification_lambda.py # Phase 6.5: Closed-loop verification
-│   └── dashboard_api/dashboard_api_lambda.py # Phase 8: Read-only dashboard API
+│   ├── dashboard_api/
+│   │   ├── dashboard_api_lambda.py   # Phase 8: Read-only dashboard API (GET)
+│   │   └── dashboard_actions_lambda.py # Phase 8: Write-path actions (approve, reject, diagnose)
+│   └── demo_control/demo_control_lambda.py # Demo fault injection & approval
 ├── infra/
 │   ├── template.yaml              # SAM template: all AWS resources (Lambdas, DynamoDB, S3, Alarms, Config)
 │   └── samconfig.toml             # SAM deployment defaults
@@ -108,11 +111,14 @@ LLM-Assisted-Cloud-Incident-Response-AWS-SBG/
 │   ├── resource_exhaustion.md
 │   ├── misconfiguration.md
 │   └── service_cascade.md
-├── tests/                         # Unit test suite (56 tests across all phases)
+├── tests/                         # Unit test suite (115 tests across all phases)
 │   ├── helpers.py                 # Shared test scaffolding with boto3 stubs
 │   ├── test_demo_app.py           # Phase 1 unit tests
 │   ├── test_collector.py          # Phase 3 unit tests
-│   ├── test_diagnosis.py          # Phase 4 unit tests
+│   ├── test_diagnosis.py          # Phase 4 unit tests (39 new tests for T1.1/T1.2)
+│   ├── test_dashboard_actions.py  # Phase 8 write-path tests
+│   ├── test_dashboard_api.py      # Phase 8 read-path tests
+│   ├── test_cross_lambda_consistency.py # Cross-lambda fallback consistency tests
 │   ├── test_notify.py             # Phase 5 notify unit tests
 │   ├── test_approval.py           # Phase 5 approval unit tests
 │   ├── test_remediation.py        # Phase 6 remediation unit tests
@@ -140,6 +146,12 @@ LLM-Assisted-Cloud-Incident-Response-AWS-SBG/
 │   ├── BACKEND_SPEC.md
 │   ├── FRONTEND_SPEC.md
 │   └── ... (phase handoff docs)
+├── scripts/                       # Operational scripts
+│   ├── deploy.sh                  # Full stack deployment
+│   ├── start_local.sh             # Start local backend (ports 3001/3002)
+│   ├── stop_local.sh              # Stop local backend
+│   ├── sync_runbooks.sh           # Upload runbooks to S3
+│   └── check_hardcoded.js         # Hardcoded value detection
 ├── env.example.json               # Example environment config (no secrets)
 └── README.md                      # This file
 ```
@@ -167,9 +179,9 @@ out of scope (for now).
 
 ---
 
-## Current status (as of September 25, 2026)
+## Current status (as of October 2, 2026)
 
-**All phases (0-8) are fully deployed and operational.** The system achieved **95.5% end-to-end test success rate** with **73/73 backend unit tests passing (100%)** and a clean frontend production build.
+**All phases (0-8) are fully deployed and operational.** The system achieved **100% backend unit test pass rate** with **115/115 tests passing** and a clean frontend production build.
 
 Build phases, in order. We do them one at a time and confirm each works before
 moving on.
@@ -178,7 +190,7 @@ moving on.
 - [x] **Phase 1 — Demo app**: services A/B/C, API endpoints, and end-to-end service calls (A→B→C chain verified).
 - [x] **Phase 2 — Detection**: CloudWatch Alarms (3), AWS Config Rules (2), GuardDuty, EventBridge rules routing to collector.
 - [x] **Phase 3 — Data collection**: `collector_lambda` writes evidence to S3 + DynamoDB.
-- [x] **Phase 4 — Knowledge base + diagnosis**: runbooks with direct context injection (no Bedrock Knowledge Bases/OpenSearch), `diagnosis_lambda` with Bedrock (Claude 3.5 Sonnet) + JSON validation.
+- [x] **Phase 4 — Knowledge base + diagnosis**: runbooks with direct context injection (no Bedrock Knowledge Bases/OpenSearch), `diagnosis_lambda` with Bedrock (Nova Pro primary, Llama 3 70B / Mistral Large / Nova Micro fallback chain) + JSON validation.
 - [x] **Phase 5 — Reporting + approval**: `notify_lambda` posts to Slack via incoming webhook with HMAC-signed approval links; `approval_handler` (API Gateway `/approval`) flips `remediation.status` and triggers remediation. Secrets from SSM SecureStrings.
 - [x] **Phase 6 — Remediation**: `remediation_lambda` executes approved fixes (`scale_up`, `restart_service`, `lock_s3_bucket`, `tighten_iam_policy`, `restart_downstream_service`, `manual_review_required`).
 - [x] **Phase 6.5 — Closed-loop verification**: `verification_lambda` re-checks the original detection signal post-remediation and logs resolution status (`resolved`, `not_resolved`, `inconclusive`) to DynamoDB.
@@ -249,7 +261,7 @@ You'll need a Mac/Linux machine and an AWS account with credentials.
 5. **Run tests**
    Execute the automated unit test suite covering all implemented phases:
    ```bash
-   python3 -m unittest discover -s tests
+   python3 -m pytest tests/ -v
    ```
 
 ---
@@ -291,6 +303,8 @@ curl "<ServiceAUrl>"
 
 The response should have HTTP 200 and `"overall_status": "success"`.
 
+---
+
 ## Phase 5 setup: Slack reporting + approvals
 
 The pipeline runs end to end even without Slack configured — messages are
@@ -329,9 +343,9 @@ To switch the reporting/approval flow on:
 
 5. **Unit tests** (no AWS account, SAM, or extra dependencies needed):
    ```bash
-   python3 -m unittest discover -s tests
+   python3 -m pytest tests/ -v
    ```
-   56 tests covering all handlers with mocked boto3: approve/reject
+   115 tests covering all handlers with mocked boto3: approve/reject
    happy paths, bad/missing token, already-processed conflicts (409),
    malformed requests, Slack/SSM/DynamoDB failure degradation, and the
    signed-approval-link construction. Runs on plain Python 3.9+.
@@ -359,6 +373,18 @@ what's yours.
 | **Evaluation & benchmarking** | Breaking things on purpose and scoring accuracy/speed | `fault_injection/`, `evaluation/` |
 | **Presentation dashboard** | Read-only visualization API & React Web UI | `backend/dashboard_api/`, `frontend/` |
 | **Paper / docs** | Architecture writeups, methodology, data schema docs | `docs/`, `README.md` |
+
+---
+
+## Recent additions (T1.1–T1.4)
+
+| Task | Description | Files |
+|---|---|---|
+| **T1.1** | `diagnosis_lambda` & `prompts.py`: `recommended_solutions` (2–3 ranked solutions with id, action, title, description, risk, expected_outcome, rationale, confidence, source) via `_validate_recommended_solutions()` / `_generate_fallback_solutions()`; stored in DynamoDB; `suggested_action` = top solution's action | `backend/diagnosis/diagnosis_lambda.py`, `backend/diagnosis/prompts.py` |
+| **T1.2** | `dashboard_api_lambda`: `_derive_recommended_solutions()` for old incidents lacking the field; used by `GET /api/incidents/{id}` | `backend/dashboard_api/dashboard_api_lambda.py` |
+| **T1.3** | Approve endpoints accept optional `{solution_id, selected_action}`; validates against incident's `recommended_solutions`; persists `selected_action`, `selected_solution_id`, `decided_at`, `approved_via`; 400 for invalid choice, 409 for double-approve | `backend/dashboard_api/dashboard_actions_lambda.py`, `backend/demo_control/demo_control_lambda.py`, `local_backend.py` |
+| **T1.4** | `remediation_lambda` executes `remediation.selected_action` if present, else falls back to `diagnosis.suggested_action`; verification runs against executed action | `backend/remediation/remediation_lambda.py` |
+| **Tests** | +39 new unit tests (validator, fallback generator, derive function, Decimal handling, cross-lambda consistency); total 115 tests | `tests/test_diagnosis.py`, `tests/test_dashboard_api.py`, `tests/test_cross_lambda_consistency.py` |
 
 ---
 
