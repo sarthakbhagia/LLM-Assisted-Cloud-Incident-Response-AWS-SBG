@@ -1278,9 +1278,10 @@ Outputs:
 
   DashboardApiUrl:
     Description: >-
-      Phase 8 dashboard API base URL. Append /api/incidents, /api/analytics,
-      /api/runbooks etc. to call the read-only dashboard endpoints.
-    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/api"
+      Phase 8 dashboard API base URL. Set VITE_API_BASE_URL to this value.
+      The frontend appends /api/incidents, /api/analytics, /api/runbooks etc.
+      This URL intentionally ends at /Prod (no trailing /api).
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod"
 
   DashboardApiRoleArn:
     Description: ARN of the Phase 8 read-only dashboard IAM role (no write permissions)

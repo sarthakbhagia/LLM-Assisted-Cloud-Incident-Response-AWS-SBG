@@ -94,6 +94,11 @@ Or deploy to S3 + CloudFront:
   aws s3 sync dist/ s3://<your-frontend-bucket>/ --delete
   aws cloudfront create-invalidation --distribution-id <dist-id> --paths "/*"
 
+NOTE: VITE_API_BASE_URL must end at /Prod with NO trailing /api.
+The frontend prepends /api/ to all routes internally (e.g. /api/incidents/{id}/evidence).
+If you set VITE_API_BASE_URL to .../Prod/api the evidence, analytics and runbook
+requests will hit .../Prod/api/api/... which does not exist, causing silent empty tabs.
+
 EOF
 
 echo "=== Deployment complete ==="

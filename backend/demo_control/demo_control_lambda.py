@@ -142,24 +142,25 @@ def _inject_fault(fault_class: str) -> dict:
         which depends on whether a non-compliant resource actually exists.
     """
     try:
+        collector_fn = os.environ.get("COLLECTOR_FUNCTION_NAME", "")
+        # Detect local mode: the LocalLambdaRouter in local_backend.py sets the
+        # collector name to "LOCAL::collector". In that mode we must NOT call
+        # SetAlarmState because the real EventBridge rule would fire the real deployed
+        # CollectorFunction Lambda, creating a second empty incident that the UI then
+        # picks as the newest. Instead, invoke the local collector directly.
+        # In deployed AWS mode (collector_fn is a real Lambda ARN), SetAlarmState
+        # triggers EventBridge which is the authoritative trigger; we skip the direct
+        # invocation to avoid the same duplicate problem in reverse.
+        is_local_mode = collector_fn.startswith("LOCAL::")
+
         if fault_class == "resource_exhaustion":
             alarm_name = FAULT_CLASS_ALARMS["resource_exhaustion"]
-            _cloudwatch.set_alarm_state(
-                AlarmName=alarm_name,
-                StateValue="ALARM",
-                StateReason="Demo Mode: Injected resource_exhaustion fault",
-                StateReasonData=json.dumps({
-                    "injected_by": "demo_mode",
-                    "fault_class": fault_class,
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                }),
-            )
-            result = {"success": True, "method": "cloudwatch_alarm", "alarm_name": alarm_name}
 
-            # In local mode EventBridge does not forward the alarm state change
-            # to the collector, so we invoke it directly.
-            collector_fn = os.environ.get("COLLECTOR_FUNCTION_NAME", "")
-            if collector_fn:
+            if is_local_mode:
+                # Local mode: direct invocation only — do NOT call SetAlarmState.
+                # SetAlarmState would trigger the real EventBridge rule → real deployed
+                # CollectorFunction → a second, empty incident that the UI picks instead
+                # of the correctly synthesised one.
                 synthetic_event = {
                     "source": "aws.cloudwatch",
                     "fault_class": "resource_exhaustion",
@@ -173,38 +174,38 @@ def _inject_fault(fault_class: str) -> dict:
                     InvocationType="Event",
                     Payload=json.dumps(synthetic_event),
                 )
-                result["collector_invoked"] = True
+                result = {
+                    "success": True,
+                    "method": "local_direct_invoke",
+                    "alarm_name": alarm_name,
+                    "collector_invoked": True,
+                }
+            else:
+                # Deployed AWS mode: SetAlarmState → EventBridge → CollectorFunction.
+                # Do NOT also directly invoke the collector; that would create a duplicate.
+                _cloudwatch.set_alarm_state(
+                    AlarmName=alarm_name,
+                    StateValue="ALARM",
+                    StateReason="Demo Mode: Injected resource_exhaustion fault",
+                    StateReasonData=json.dumps({
+                        "injected_by": "demo_mode",
+                        "fault_class": fault_class,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    }),
+                )
+                result = {"success": True, "method": "cloudwatch_alarm", "alarm_name": alarm_name}
             return result
 
         elif fault_class == "service_cascade":
-            # Set BOTH component metric alarms. The composite alarm will
-            # transition to ALARM automatically and generate the EventBridge event.
             reason_data = json.dumps({
                 "injected_by": "demo_mode",
                 "fault_class": fault_class,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             })
-            set_alarms = []
-            for component_alarm in SERVICE_CASCADE_COMPONENT_ALARMS:
-                _cloudwatch.set_alarm_state(
-                    AlarmName=component_alarm,
-                    StateValue="ALARM",
-                    StateReason="Demo Mode: Injected service_cascade fault (component alarm)",
-                    StateReasonData=reason_data,
-                )
-                set_alarms.append(component_alarm)
-            result = {
-                "success": True,
-                "method": "cloudwatch_component_alarms",
-                "component_alarms_set": set_alarms,
-                "composite_alarm": FAULT_CLASS_ALARMS["service_cascade"],
-                "note": "Component metric alarms set to ALARM. Composite alarm will transition automatically.",
-            }
 
-            # In local mode EventBridge does not forward the composite alarm
-            # transition to the collector, so we invoke it directly.
-            collector_fn = os.environ.get("COLLECTOR_FUNCTION_NAME", "")
-            if collector_fn:
+            if is_local_mode:
+                # Local mode: direct invocation only — skip SetAlarmState for the same
+                # reason as resource_exhaustion above.
                 composite_alarm = FAULT_CLASS_ALARMS["service_cascade"]
                 synthetic_event = {
                     "source": "aws.cloudwatch",
@@ -219,7 +220,31 @@ def _inject_fault(fault_class: str) -> dict:
                     InvocationType="Event",
                     Payload=json.dumps(synthetic_event),
                 )
-                result["collector_invoked"] = True
+                result = {
+                    "success": True,
+                    "method": "local_direct_invoke",
+                    "composite_alarm": composite_alarm,
+                    "collector_invoked": True,
+                }
+            else:
+                # Deployed AWS mode: set BOTH component metric alarms so the composite
+                # alarm transitions to ALARM naturally and EventBridge fires.
+                set_alarms = []
+                for component_alarm in SERVICE_CASCADE_COMPONENT_ALARMS:
+                    _cloudwatch.set_alarm_state(
+                        AlarmName=component_alarm,
+                        StateValue="ALARM",
+                        StateReason="Demo Mode: Injected service_cascade fault (component alarm)",
+                        StateReasonData=reason_data,
+                    )
+                    set_alarms.append(component_alarm)
+                result = {
+                    "success": True,
+                    "method": "cloudwatch_component_alarms",
+                    "component_alarms_set": set_alarms,
+                    "composite_alarm": FAULT_CLASS_ALARMS["service_cascade"],
+                    "note": "Component metric alarms set to ALARM. Composite alarm will transition automatically.",
+                }
             return result
 
         elif fault_class == "misconfiguration":

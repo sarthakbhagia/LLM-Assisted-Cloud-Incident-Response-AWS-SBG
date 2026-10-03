@@ -159,6 +159,7 @@ def _parse_event(event: dict) -> dict:
             "detector_id": None,
             "state": event.get("state"),
             "reason": event.get("reason"),
+            "injected_by": event.get("injected_by"),
         }
 
     # ---- AWS Config (misconfiguration) -------------------------------------
@@ -172,6 +173,7 @@ def _parse_event(event: dict) -> dict:
             "resource_type": event.get("resource_type"),
             "finding_id": None,
             "detector_id": None,
+            "injected_by": event.get("injected_by"),
         }
 
     # ---- GuardDuty (raw finding — no InputTransformer applied) -------------
@@ -208,6 +210,7 @@ def _parse_event(event: dict) -> dict:
             "resource_type": event.get("resource_type"),
             "finding_id": event.get("finding_id"),
             "detector_id": event.get("detector_id"),
+            "injected_by": event.get("injected_by"),
         }
 
     raise ValueError(
@@ -319,7 +322,113 @@ def _collect_resource_exhaustion(parsed: dict, start_ms: int, end_ms: int) -> di
 
         evidence["metrics"] = _get_lambda_metrics(function_name, start_ms, end_ms)
 
+        # Demo mode: if the demo control injected this alarm but no real Lambda traffic
+        # existed in the collection window (common because SetAlarmState does not invoke
+        # the function), fill in clearly-labelled synthetic telemetry so the Evidence
+        # Explorer has data to render. This only fires when ALL metric series are empty
+        # AND the event was explicitly injected by demo_mode.
+        is_demo = parsed.get("injected_by") == "demo_mode"
+        if is_demo and _all_metrics_empty(evidence.get("metrics", {})):
+            synthetic = _make_synthetic_resource_exhaustion_evidence(end_ms, function_name)
+            evidence["metrics"] = synthetic["metrics"]
+            evidence["logs_insights"] = synthetic["logs_insights"]
+            evidence["demo_synthetic"] = True
+            evidence["demo_synthetic_reason"] = (
+                "Demo mode: no real Lambda invocations occurred in the 15-minute collection window "
+                "because SetAlarmState does not trigger a Lambda execution. "
+                "This data is illustrative only and shows what a real resource-exhaustion incident would look like."
+            )
+            logger.info(json.dumps({
+                "event": "demo_synthetic_evidence_injected",
+                "function_name": function_name,
+                "reason": "all_metrics_empty_demo_mode",
+            }))
+
     return evidence
+
+
+def _all_metrics_empty(metrics: dict) -> bool:
+    """Return True if every metric series in the dict is an empty list."""
+    if not metrics:
+        return True
+    return all(isinstance(v, list) and len(v) == 0 for v in metrics.values())
+
+
+def _make_synthetic_resource_exhaustion_evidence(end_ms: int, function_name: str) -> dict:
+    """
+    Build realistic-looking synthetic evidence for a resource_exhaustion demo incident.
+
+    The Duration series escalates from ~3 s to beyond the 50,000 ms alarm threshold,
+    with matching Errors and Invocations. Log rows include REPORT lines that mirror
+    what CloudWatch Logs Insights returns for a real runaway Lambda.
+
+    All timestamps are anchored to the 15-minute window ending at end_ms so the
+    chart x-axis aligns with the incident detection time.
+    """
+    from datetime import datetime, timezone as tz  # noqa: PLC0415
+
+    # Build 15 one-minute datapoints ending at end_ms
+    end_s = end_ms // 1000
+    # Duration escalation: starts normal (~3 s), then spikes past 50 s
+    duration_values = [
+        3100, 3250, 3800, 5200, 8400, 14300, 22100, 35600, 51200, 58900,
+        61400, 59800, 57200, 55000, 53100,
+    ]
+    # One error in the middle of the spike; invocations stay constant
+    error_values =    [0, 0, 0, 0, 0, 0, 0, 1, 2, 3, 3, 2, 1, 1, 1]
+    throttle_values = [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0]
+    invocation_values = [12, 11, 13, 12, 11, 10, 10, 9, 8, 8, 7, 8, 8, 9, 10]
+
+    n = len(duration_values)
+    metrics = {"duration": [], "errors": [], "throttles": [], "invocations": []}
+    log_rows = []
+
+    for i in range(n):
+        ts_s = end_s - (n - 1 - i) * 60
+        ts_iso = datetime.fromtimestamp(ts_s, tz=tz.utc).strftime("%Y-%m-%d %H:%M:%S.000")
+        ts_str = datetime.fromtimestamp(ts_s, tz=tz.utc).isoformat()
+
+        metrics["duration"].append({"timestamp": ts_str, "value": duration_values[i]})
+        metrics["errors"].append({"timestamp": ts_str, "value": error_values[i]})
+        metrics["throttles"].append({"timestamp": ts_str, "value": throttle_values[i]})
+        metrics["invocations"].append({"timestamp": ts_str, "value": invocation_values[i]})
+
+        # Generate a REPORT log row for each datapoint
+        billed = min(duration_values[i] + 100, 900000)
+        log_rows.append({
+            "@timestamp": ts_iso,
+            "@message": (
+                f"REPORT RequestId: demo-{i:04x}-{ts_s % 0xFFFF:04x}\t"
+                f"Duration: {duration_values[i]:.2f} ms\t"
+                f"Billed Duration: {billed} ms\t"
+                f"Memory Size: 512 MB\t"
+                f"Max Memory Used: {280 + i * 8} MB"
+            ),
+            "@requestId": f"demo-{i:04x}-{ts_s % 0xFFFF:04x}",
+            "@duration": str(duration_values[i]),
+            "@billedDuration": str(billed),
+            "@maxMemoryUsed": str(280 + i * 8),
+        })
+        # Add ERROR rows for the spike period
+        if error_values[i] > 0:
+            log_rows.append({
+                "@timestamp": ts_iso,
+                "@message": (
+                    f"[ERROR] RequestId: demo-err-{i:04x}\t"
+                    f"Task timed out after {duration_values[i] / 1000:.2f} seconds"
+                ),
+                "@requestId": f"demo-err-{i:04x}",
+            })
+
+    return {
+        "metrics": metrics,
+        "logs_insights": {
+            "status": "Complete",
+            "rows": log_rows,
+            "bytesScanned": len(log_rows) * 220,
+            "demo_synthetic": True,
+        },
+    }
 
 
 def _infer_function_name_from_alarm(alarm_name: str) -> str | None:
@@ -441,35 +550,137 @@ def _collect_misconfiguration(parsed: dict, start_ms: int, end_ms: int) -> dict:
             finding_id=parsed["finding_id"],
         )
 
+    # Demo mode: Config events injected by demo_mode query the same real AWS Config
+    # backend, but the demo resource was already remediated (Public Access Block applied),
+    # so NON_COMPLIANT results are empty. Fill in synthetic Config evidence so the Config
+    # tab has something to display. Guard: injected_by == "demo_mode" AND results empty.
+    is_demo = parsed.get("injected_by") == "demo_mode"
+    config_results = evidence.get("config_compliance", {}).get("results", [])
+    if is_demo and not config_results:
+        synthetic = _make_synthetic_misconfiguration_evidence(
+            resource_id=parsed.get("resource_id", "demo-bucket"),
+            resource_type=parsed.get("resource_type", "AWS::S3::Bucket"),
+            config_rule=parsed.get("config_rule", "demo-config-rule"),
+        )
+        evidence["config_compliance"] = synthetic["config_compliance"]
+        evidence["resource_config_history"] = synthetic["resource_config_history"]
+        evidence["demo_synthetic"] = True
+        evidence["demo_synthetic_reason"] = (
+            "Demo mode: the demo bucket was already remediated (Public Access Block is enabled), "
+            "so AWS Config reports zero NON_COMPLIANT resources. "
+            "This data is illustrative only and shows what a real public-S3 misconfiguration incident would look like."
+        )
+        logger.info(json.dumps({
+            "event": "demo_synthetic_evidence_injected",
+            "fault_class": "misconfiguration",
+            "reason": "config_results_empty_demo_mode",
+        }))
+
     return evidence
 
 
-def _get_config_compliance(rule_name: str, resource_type: str | None, resource_id: str | None) -> dict:
-    try:
-        kwargs = {"ConfigRuleName": rule_name, "ComplianceTypes": ["NON_COMPLIANT"], "Limit": 25}
-        if resource_type:
-            kwargs["Filters"] = {"ResourceType": resource_type}
-            if resource_id:
-                kwargs["Filters"]["ResourceId"] = resource_id
-        resp = _config.get_compliance_details_by_config_rule(**kwargs)
-        return {
+def _make_synthetic_misconfiguration_evidence(resource_id: str, resource_type: str, config_rule: str) -> dict:
+    """
+    Generate realistic synthetic Config evidence for a misconfiguration demo incident.
+
+    Shows an S3 bucket that has public access enabled (no Public Access Block),
+    with a configuration history showing the bucket was created without the block
+    and was later misconfigured via a bucket policy change.
+    """
+    from datetime import datetime, timezone as tz, timedelta  # noqa: PLC0415
+
+    now = datetime.now(tz=tz.utc)
+    created_at = (now - timedelta(hours=48)).isoformat()
+    misconfigured_at = (now - timedelta(minutes=45)).isoformat()
+
+    return {
+        "config_compliance": {
             "results": [
                 {
-                    "resource_id": r.get("EvaluationResultIdentifier", {})
-                    .get("EvaluationResultQualifier", {})
-                    .get("ResourceId"),
-                    "resource_type": r.get("EvaluationResultIdentifier", {})
-                    .get("EvaluationResultQualifier", {})
-                    .get("ResourceType"),
-                    "compliance_type": r.get("ComplianceType"),
-                    "result_recorded_time": str(r.get("ResultRecordedTime")),
-                    "annotation": r.get("Annotation"),
+                    "resource_id": resource_id,
+                    "resource_type": resource_type,
+                    "compliance_type": "NON_COMPLIANT",
+                    "result_recorded_time": misconfigured_at,
+                    "annotation": (
+                        "S3 bucket has public read access enabled via bucket ACL. "
+                        "BlockPublicAcls and BlockPublicPolicy are both disabled. "
+                        "Objects in this bucket may be accessible to the public internet."
+                    ),
                 }
-                for r in resp.get("EvaluationResults", [])
-            ]
-        }
+            ],
+            "demo_synthetic": True,
+        },
+        "resource_config_history": {
+            "items": [
+                {
+                    "version": "1.3",
+                    "config_capture_time": misconfigured_at,
+                    "configuration_state_id": "3",
+                    "resource_creation_time": created_at,
+                    "configuration": (
+                        '{"BlockPublicAcls": false, "IgnorePublicAcls": false, '
+                        '"BlockPublicPolicy": false, "RestrictPublicBuckets": false}'
+                    ),
+                    "relationships": [],
+                    "tags": {"Environment": "demo", "ManagedBy": "terraform"},
+                },
+                {
+                    "version": "1.2",
+                    "config_capture_time": created_at,
+                    "configuration_state_id": "2",
+                    "resource_creation_time": created_at,
+                    "configuration": (
+                        '{"BlockPublicAcls": true, "IgnorePublicAcls": true, '
+                        '"BlockPublicPolicy": true, "RestrictPublicBuckets": true}'
+                    ),
+                    "relationships": [],
+                    "tags": {"Environment": "demo", "ManagedBy": "terraform"},
+                },
+            ],
+            "demo_synthetic": True,
+        },
+    }
+
+
+def _get_config_compliance(rule_name: str, resource_type: str | None, resource_id: str | None) -> dict:
+    """
+    Fetch NON_COMPLIANT evaluation results for a Config rule.
+
+    NOTE: get_compliance_details_by_config_rule does NOT accept a Filters parameter.
+    We fetch all NON_COMPLIANT results and filter by resource_type/resource_id in Python.
+    """
+    try:
+        # No Filters argument — the API does not support it; filter post-fetch instead.
+        resp = _config.get_compliance_details_by_config_rule(
+            ConfigRuleName=rule_name,
+            ComplianceTypes=["NON_COMPLIANT"],
+            Limit=25,
+        )
+        results = []
+        for r in resp.get("EvaluationResults", []):
+            qualifier = (
+                r.get("EvaluationResultIdentifier", {})
+                .get("EvaluationResultQualifier", {})
+            )
+            r_resource_id = qualifier.get("ResourceId")
+            r_resource_type = qualifier.get("ResourceType")
+            # Filter in Python when a specific resource was provided
+            if resource_type and r_resource_type != resource_type:
+                continue
+            if resource_id and r_resource_id not in (resource_id, None):
+                continue
+            results.append({
+                "resource_id": r_resource_id,
+                "resource_type": r_resource_type,
+                "compliance_type": r.get("ComplianceType"),
+                "result_recorded_time": str(r.get("ResultRecordedTime")),
+                "annotation": r.get("Annotation"),
+            })
+        return {"results": results}
     except ClientError as exc:
         return {"error": str(exc)}
+    except Exception as exc:  # catches ParamValidationError and any other boto3 issue
+        return {"error": f"Config API error: {exc}"}
 
 
 def _get_resource_config_history(resource_type: str, resource_id: str) -> dict:
@@ -570,9 +781,22 @@ def _collect_service_cascade(parsed: dict, start_ms: int, end_ms: int) -> dict:
             evidence.setdefault("component_alarm_thresholds", {})[ca] = ca_thresholds
 
     # CW Logs Insights across all service log groups
-    if log_groups:
+    # Filter to only groups that exist: including a non-existent group in the query
+    # causes a ResourceNotFoundException and fails the whole query (not just that group).
+    existing_log_groups = []
+    for lg in log_groups:
+        try:
+            resp = _cw_logs.describe_log_groups(logGroupNamePrefix=lg, limit=1)
+            if any(g["logGroupName"] == lg for g in resp.get("logGroups", [])):
+                existing_log_groups.append(lg)
+            else:
+                logger.warning(json.dumps({"event": "log_group_not_found", "log_group": lg}))
+        except ClientError as exc:
+            logger.warning(json.dumps({"event": "log_group_describe_error", "log_group": lg, "error": str(exc)}))
+
+    if existing_log_groups:
         evidence["logs_insights"] = _run_logs_insights_query(
-            log_groups=log_groups,
+            log_groups=existing_log_groups,
             query=(
                 "fields @timestamp, @log, @message, @requestId "
                 "| filter @message like /ERROR/ or @message like /Exception/ or @message like /downstream/ "
@@ -582,6 +806,26 @@ def _collect_service_cascade(parsed: dict, start_ms: int, end_ms: int) -> dict:
             start_ms=start_ms,
             end_ms=end_ms,
         )
+    else:
+        evidence["logs_insights"] = {
+            "status": "Skipped",
+            "rows": [],
+            "reason": "No service log groups exist yet (Lambda functions may not have been invoked).",
+        }
+
+
+    # CloudWatch metrics for every resolved service function.
+    # Flattened into evidence["metrics"] as { "service_a_duration": [...], "service_a_errors": [...], ... }
+    # so the frontend EvidenceTabContent metrics tab can chart them directly — it expects
+    # evidence["metrics"] to be a flat dict where each value is an array of {timestamp, value} points.
+    flat_metrics = {}
+    for svc_key, fn_name in service_functions.items():
+        if fn_name:
+            svc_metrics = _get_lambda_metrics(fn_name, start_ms, end_ms)
+            for metric_key, datapoints in svc_metrics.items():
+                flat_metrics[f"{svc_key}_{metric_key}"] = datapoints
+    if flat_metrics:
+        evidence["metrics"] = flat_metrics
 
     # X-Ray trace summaries
     try:
@@ -633,7 +877,144 @@ def _collect_service_cascade(parsed: dict, start_ms: int, end_ms: int) -> dict:
     except ClientError as exc:
         evidence["xray_service_graph_error"] = str(exc)
 
+    # Demo mode: if the demo control injected this event but no real inter-service
+    # traffic occurred (the demo only calls SetAlarmState / direct collector invoke,
+    # it does not actually invoke Service A), all metric series and log rows will be
+    # empty. Fill in synthetic telemetry so the Evidence Explorer has data to render.
+    # Guard: only fires when injected_by == "demo_mode" AND all collected metrics empty.
+    is_demo = parsed.get("injected_by") == "demo_mode"
+    if is_demo and _all_metrics_empty(evidence.get("metrics", {})):
+        synthetic = _make_synthetic_service_cascade_evidence(end_ms, service_functions)
+        evidence["metrics"] = synthetic["metrics"]
+        evidence["logs_insights"] = synthetic["logs_insights"]
+        evidence["xray_trace_summaries"] = synthetic["xray_trace_summaries"]
+        evidence["demo_synthetic"] = True
+        evidence["demo_synthetic_reason"] = (
+            "Demo mode: no real inter-service traffic occurred in the 15-minute collection window "
+            "because the demo only injects an alarm state change — it does not invoke Service A. "
+            "This data is illustrative only and shows what a real service-cascade incident would look like."
+        )
+        logger.info(json.dumps({
+            "event": "demo_synthetic_evidence_injected",
+            "fault_class": "service_cascade",
+            "reason": "all_metrics_empty_demo_mode",
+        }))
+
     return evidence
+
+
+def _make_synthetic_service_cascade_evidence(end_ms: int, service_functions: dict) -> dict:
+    """
+    Generate realistic synthetic evidence for a service_cascade demo incident.
+
+    Service C develops latency first (slow DB), which causes Service B to time out,
+    which causes Service A to error and raise. Metrics escalate over 15 minutes.
+    All timestamps are anchored to the real collection window end so charts align.
+    """
+    from datetime import datetime, timezone as tz  # noqa: PLC0415
+
+    end_s = end_ms // 1000
+    n = 15  # one datapoint per minute
+
+    # service_a: errors spike after service_b starts failing (~minute 8)
+    svc_a_errors =       [0, 0, 0, 0, 0, 0, 0, 1, 3, 5, 6, 6, 5, 4, 4]
+    svc_a_duration =     [320, 330, 315, 340, 325, 330, 5100, 5050, 5020, 5030, 5010, 5040, 5020, 5000, 5010]
+    svc_a_invocations =  [10, 11, 10, 12, 11, 10, 10, 9, 8, 8, 7, 7, 8, 9, 9]
+    svc_a_throttles =    [0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0]
+
+    # service_b: errors start ~minute 7, duration spikes due to downstream timeout
+    svc_b_errors =       [0, 0, 0, 0, 0, 0, 1, 3, 4, 5, 5, 5, 4, 3, 3]
+    svc_b_duration =     [210, 215, 220, 210, 215, 3800, 5000, 5020, 5010, 5000, 5010, 5000, 4990, 5000, 4980]
+    svc_b_invocations =  [10, 11, 10, 12, 11, 10, 10, 9, 8, 8, 7, 7, 8, 9, 9]
+    svc_b_throttles =    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+    # service_c: latency climbs steadily (slow downstream DB), no hard errors
+    svc_c_errors =       [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    svc_c_duration =     [180, 210, 350, 620, 980, 1800, 2900, 3800, 4500, 5100, 5300, 5200, 5100, 5050, 5020]
+    svc_c_invocations =  [10, 11, 10, 12, 11, 10, 10, 9, 8, 8, 7, 7, 8, 9, 9]
+    svc_c_throttles =    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0, 0]
+
+    series_map = {
+        "service_a": {"errors": svc_a_errors, "duration": svc_a_duration,
+                      "invocations": svc_a_invocations, "throttles": svc_a_throttles},
+        "service_b": {"errors": svc_b_errors, "duration": svc_b_duration,
+                      "invocations": svc_b_invocations, "throttles": svc_b_throttles},
+        "service_c": {"errors": svc_c_errors, "duration": svc_c_duration,
+                      "invocations": svc_c_invocations, "throttles": svc_c_throttles},
+    }
+
+    metrics: dict = {}
+    log_rows = []
+    xray_traces = []
+
+    for i in range(n):
+        ts_s = end_s - (n - 1 - i) * 60
+        ts_str = datetime.fromtimestamp(ts_s, tz=tz.utc).isoformat()
+        ts_iso = datetime.fromtimestamp(ts_s, tz=tz.utc).strftime("%Y-%m-%d %H:%M:%S.000")
+
+        for svc_key, series in series_map.items():
+            for metric_key, values in series.items():
+                flat_key = f"{svc_key}_{metric_key}"
+                metrics.setdefault(flat_key, []).append({"timestamp": ts_str, "value": values[i]})
+
+        # Log rows: generate ERROR entries for services that have errors at this minute
+        for svc_key, series in series_map.items():
+            err_count = series["errors"][i]
+            dur = series["duration"][i]
+            fn_name = service_functions.get(svc_key) or f"demo-{svc_key}"
+            # Always emit a REPORT row
+            log_rows.append({
+                "@timestamp": ts_iso,
+                "@log": f"/aws/lambda/{fn_name}",
+                "@message": (
+                    f"REPORT RequestId: demo-{svc_key[8:]}-{i:04x}\t"
+                    f"Duration: {dur:.1f} ms\tBilled Duration: {dur + 100} ms\t"
+                    f"Memory Size: 256 MB\tMax Memory Used: 145 MB"
+                ),
+                "@requestId": f"demo-{svc_key[8:]}-{i:04x}",
+            })
+            if err_count > 0:
+                if svc_key == "service_a":
+                    msg = f"[ERROR] Service A downstream failure: Service B timed out after {dur:.0f} ms"
+                elif svc_key == "service_b":
+                    msg = f"[ERROR] Service B downstream request to Service C timed out after {dur:.0f} ms"
+                else:
+                    msg = f"[ERROR] Service C database query exceeded latency budget: {dur:.0f} ms"
+                log_rows.append({
+                    "@timestamp": ts_iso,
+                    "@log": f"/aws/lambda/{fn_name}",
+                    "@message": msg,
+                    "@requestId": f"demo-err-{svc_key[8:]}-{i:04x}",
+                })
+
+        # Synthetic X-Ray trace for minutes where errors exist
+        if svc_a_errors[i] > 0:
+            xray_traces.append({
+                "id": f"demo-trace-{i:04x}-{ts_s % 0xFFFF:04x}",
+                "duration": round(svc_a_duration[i] / 1000, 3),
+                "response_time": round(svc_a_duration[i] / 1000, 3),
+                "has_fault": True,
+                "has_error": True,
+                "has_throttle": svc_a_throttles[i] > 0,
+                "http": {"response": {"status": 500}},
+                "service_ids": [
+                    {"name": "service-a", "type": "AWS::Lambda::Function"},
+                    {"name": "service-b", "type": "AWS::Lambda::Function"},
+                    {"name": "service-c", "type": "AWS::Lambda::Function"},
+                ],
+                "entry_point": {"name": "service-a", "type": "AWS::Lambda::Function"},
+            })
+
+    return {
+        "metrics": metrics,
+        "logs_insights": {
+            "status": "Complete",
+            "rows": log_rows,
+            "bytesScanned": len(log_rows) * 180,
+            "demo_synthetic": True,
+        },
+        "xray_trace_summaries": xray_traces,
+    }
 
 
 # ===========================================================================

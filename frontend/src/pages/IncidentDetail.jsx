@@ -49,6 +49,7 @@ export default function IncidentDetail() {
   const [activeTab, setActiveTab] = useState('metrics')
   const [retriggering, setRetriggering] = useState(false)
   const [retriggerMessage, setRetriggerMessage] = useState(null)
+  const [evidenceError, setEvidenceError] = useState(null)
   // Track the remediation status at page load to detect stale state
   const [initialRemStatus, setInitialRemStatus] = useState(null)
 
@@ -77,8 +78,16 @@ export default function IncidentDetail() {
         // Store the full response: { incident_id, fault_class, s3_key, evidence: {...} }
         // EvidenceTabContent reads data.evidence internally
         setRawData(evidenceResult.value)
+        setEvidenceError(null)
+      } else {
+        const errMsg = evidenceResult.reason?.message || String(evidenceResult.reason)
+        // 404 means the collector hasn't run yet — silently show empty state.
+        // Any other error (e.g. wrong API URL, 500) is surfaced so operators can diagnose it.
+        const is404 = errMsg.includes('404') || errMsg.toLowerCase().includes('not found') || errMsg.toLowerCase().includes('not yet collected')
+        if (!is404) {
+          setEvidenceError(errMsg)
+        }
       }
-      // Evidence 404 is silent — EvidenceExplorer shows an empty state
 
       setError(null)
     } catch (err) {
@@ -185,6 +194,7 @@ export default function IncidentDetail() {
             faultClass={incident.fault_class}
             activeTab={activeTab}
             onTabChange={setActiveTab}
+            fetchError={evidenceError}
           />
         </div>
 
@@ -660,7 +670,7 @@ function PipelineTracePanel({ incidentId }) {
   )
 }
 
-function EvidenceExplorer({ rawData, faultClass, activeTab, onTabChange }) {
+export function EvidenceExplorer({ rawData, faultClass, activeTab, onTabChange, fetchError }) {
   // Determine available tabs based on fault_class
   const tabs = ['raw json']
   if (faultClass === 'resource_exhaustion' || faultClass === 'service_cascade') {
@@ -672,7 +682,10 @@ function EvidenceExplorer({ rawData, faultClass, activeTab, onTabChange }) {
   if (faultClass === 'misconfiguration') {
     tabs.unshift('config')
     if (rawData?.evidence?.evidence?.guardduty_finding) tabs.splice(1, 0, 'guardduty')
-    tabs.unshift('logs')
+    // NOTE: logs tab is intentionally NOT added for misconfiguration.
+    // Misconfiguration incidents are AWS Config findings, not Lambda failures.
+    // The Config tab is the primary evidence view; adding logs would make an
+    // intentionally-empty tab the default (since unshift puts it first).
   }
 
   // Ensure active tab is valid for this fault class
@@ -683,6 +696,36 @@ function EvidenceExplorer({ rawData, faultClass, activeTab, onTabChange }) {
       <div className="flex items-center justify-between mb-4">
         <h3 className="text-sm font-medium text-text-primary">Evidence Explorer</h3>
       </div>
+
+      {/* SE: Show error when the evidence API itself fails (e.g. wrong VITE_API_BASE_URL) */}
+      {fetchError && (
+        <div className="mb-4 p-3 bg-crimson-surface border border-crimson/30 rounded-card flex items-start space-x-2">
+          <AlertTriangle className="w-4 h-4 text-crimson flex-shrink-0 mt-0.5" />
+          <div>
+            <p className="text-xs text-crimson font-medium">Evidence API Error</p>
+            <p className="text-xs text-text-secondary mt-0.5">
+              {fetchError} — Check that VITE_API_BASE_URL ends at /Prod (not /Prod/api).
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* Collector-side evidence_error: collection ran but threw an exception before producing data */}
+      {rawData?.evidence?.evidence_error && (
+        <div className="mb-4 p-3 bg-amber-surface border border-amber/30 rounded-card flex items-start space-x-2">
+          <AlertTriangle className="w-4 h-4 text-amber flex-shrink-0 mt-0.5" />
+          <div>
+            <p className="text-xs text-amber font-medium">Evidence Collection Error</p>
+            <p className="text-xs text-text-secondary mt-0.5">
+              The collector ran but encountered an error before producing evidence data.
+              Check the collector Lambda logs for the full stack trace.
+            </p>
+            <p className="text-xs text-text-tertiary mt-1 font-mono break-all">
+              {rawData.evidence.evidence_error}
+            </p>
+          </div>
+        </div>
+      )}
 
       {/* SE-5: Show warning when function name resolution failed and logs/metrics are missing */}
       {rawData?.evidence?.evidence?.evidence_collection_partial && (
@@ -696,6 +739,21 @@ function EvidenceExplorer({ rawData, faultClass, activeTab, onTabChange }) {
           </div>
         </div>
       )}
+
+      {/* Demo synthetic data notice — shown when the collector generated illustrative data */}
+      {rawData?.evidence?.evidence?.demo_synthetic && (
+        <div className="mb-4 p-3 bg-blue-500/10 border border-blue-500/30 rounded-card flex items-start space-x-2">
+          <Zap className="w-4 h-4 text-blue-400 flex-shrink-0 mt-0.5" />
+          <div>
+            <p className="text-xs text-blue-400 font-medium">Demo Synthetic Data</p>
+            <p className="text-xs text-text-secondary mt-0.5">
+              {rawData?.evidence?.evidence?.demo_synthetic_reason ||
+                'This incident was injected by demo mode. The metrics and logs shown are illustrative synthetic data, not real CloudWatch telemetry.'}
+            </p>
+          </div>
+        </div>
+      )}
+
       
       {/* Tab Navigation */}
       <div className="flex space-x-1 mb-4 bg-bg-elevated rounded p-1 flex-wrap gap-1">

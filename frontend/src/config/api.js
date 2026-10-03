@@ -6,10 +6,15 @@
 //   VITE_DEMO_API_BASE_URL=https://<demo-api-id>.execute-api.<region>.amazonaws.com/Prod
 // Local dev: leave VITE_API_BASE_URL unset. Empty string means relative URLs,
 // which Vite's dev server proxy routes to localhost:3001 (see vite.config.js).
-// Production: set VITE_API_BASE_URL=https://<api-id>.execute-api.<region>.amazonaws.com/Prod
-// 
+// Production: VITE_API_BASE_URL must end at /Prod with NO trailing /api.
+//   Correct:   VITE_API_BASE_URL=https://<id>.execute-api.<region>.amazonaws.com/Prod
+//   Wrong:     VITE_API_BASE_URL=https://<id>.execute-api.<region>.amazonaws.com/Prod/api
+// The frontend appends /api/incidents, /api/analytics etc. internally, so including
+// /api in the base URL causes all evidence requests to hit /Prod/api/api/... (404).
+//
 // IMPORTANT: In production builds, VITE_API_BASE_URL and VITE_DEMO_API_BASE_URL MUST be set.
 // If empty in production mode, a config error screen will be shown.
+
 
 const isProduction = import.meta.env.PROD
 const apiBaseUrl = import.meta.env.VITE_API_BASE_URL

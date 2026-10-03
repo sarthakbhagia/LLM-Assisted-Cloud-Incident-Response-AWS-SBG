@@ -17,6 +17,7 @@ import {
   ArrowRight
 } from 'lucide-react'
 import { apiClient } from '../config/api'
+import { EvidenceExplorer } from './IncidentDetail'
 import { 
   PIPELINE_STAGES, 
   getConfidenceLevel,
@@ -649,6 +650,7 @@ function ReplayControls({ currentStage, isPlaying, speed, onPlay, onPause, onRes
 
 // --- ReplayStageView ---
 function ReplayStageView({ incident, rawData, currentStage, severity, activeTab, onTabChange, expandedStages, onToggleStage }) {
+  const faultClass = incident?.fault_class || rawData?.fault_class || rawData?.evidence?.fault_class
   return (
     <div className="space-y-6">
       {/* Incident Header — always visible (stage >= 0) */}
@@ -683,10 +685,12 @@ function ReplayStageView({ incident, rawData, currentStage, severity, activeTab,
 
           {/* EvidenceExplorer — visible at stage >= 1 (Collect) */}
           {currentStage >= 1 ? (
-            <FrozenEvidenceExplorer
+            <EvidenceExplorer
               rawData={rawData}
+              faultClass={faultClass}
               activeTab={activeTab}
               onTabChange={onTabChange}
+              fetchError={null}
             />
           ) : (
             <div className="card">
@@ -908,77 +912,9 @@ function FrozenDiagnosisPanel({ incident }) {
   )
 }
 
-function FrozenEvidenceExplorer({ rawData, activeTab, onTabChange }) {
-  const tabs = ['metrics', 'logs', 'xray', 'json']
-
-  return (
-    <div className="card">
-      <div className="flex items-center justify-between mb-4">
-        <h3 className="text-sm font-medium text-text-primary">Evidence Explorer</h3>
-      </div>
-
-      {/* Tab Navigation */}
-      <div className="flex space-x-1 mb-4 bg-bg-elevated rounded p-1">
-        {tabs.map((tab) => (
-          <button
-            key={tab}
-            onClick={() => onTabChange(tab)}
-            className={`px-3 py-1 text-xs font-medium rounded capitalize transition-colors ${
-              activeTab === tab
-                ? 'bg-bg-surface text-text-primary'
-                : 'text-text-secondary hover:text-text-primary'
-            }`}
-          >
-            {tab}
-          </button>
-        ))}
-      </div>
-
-      {/* Tab Content */}
-      <div className="bg-bg-input rounded-card p-4 min-h-48">
-        {rawData ? (
-          <FrozenEvidenceTabContent tab={activeTab} data={rawData} />
-        ) : (
-          <div className="text-center py-12">
-            <Eye className="mx-auto w-8 h-8 text-text-muted mb-3" />
-            <p className="text-sm text-text-secondary">No evidence data available</p>
-          </div>
-        )}
-      </div>
-    </div>
-  )
-}
-
-function FrozenEvidenceTabContent({ tab, data }) {
-  switch (tab) {
-    case 'json':
-      return (
-        <pre className="text-xs text-text-code font-mono whitespace-pre-wrap overflow-auto">
-          {JSON.stringify(data, null, 2)}
-        </pre>
-      )
-    case 'metrics':
-      return (
-        <div className="text-xs text-text-secondary">
-          <p>CloudWatch metrics and alarm data would be displayed here</p>
-        </div>
-      )
-    case 'logs':
-      return (
-        <div className="text-xs text-text-secondary">
-          <p>Log entries would be displayed here</p>
-        </div>
-      )
-    case 'xray':
-      return (
-        <div className="text-xs text-text-secondary">
-          <p>X-Ray trace data would be displayed here</p>
-        </div>
-      )
-    default:
-      return null
-  }
-}
+// FrozenEvidenceExplorer and FrozenEvidenceTabContent have been replaced by the shared
+// EvidenceExplorer component (imported from IncidentDetail.jsx) which renders real
+// CloudWatch metrics charts, log rows, and X-Ray trace summaries from the evidence bundle.
 
 function FrozenApprovalCard({ incident, currentStage }) {
   const remediation = incident.remediation || {}
