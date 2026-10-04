@@ -181,19 +181,34 @@ def _inject_fault(fault_class: str) -> dict:
                     "collector_invoked": True,
                 }
             else:
-                # Deployed AWS mode: SetAlarmState → EventBridge → CollectorFunction.
-                # Do NOT also directly invoke the collector; that would create a duplicate.
-                _cloudwatch.set_alarm_state(
-                    AlarmName=alarm_name,
-                    StateValue="ALARM",
-                    StateReason="Demo Mode: Injected resource_exhaustion fault",
-                    StateReasonData=json.dumps({
-                        "injected_by": "demo_mode",
-                        "fault_class": fault_class,
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
-                    }),
+                # Deployed AWS mode: direct collector invocation (same as local mode).
+                # SetAlarmState → EventBridge was the original approach but has two problems:
+                #   1. SetAlarmState does not generate real Lambda invocation metrics, so the
+                #      collector always receives empty CloudWatch evidence in demo mode.
+                #   2. The EventBridge InputTransformer cannot parse injected_by out of
+                #      StateReasonData (a JSON string inside JSON), so the collector's
+                #      synthetic evidence branch never fires.
+                # Direct invocation passes injected_by as a first-class field and avoids
+                # the duplicate-incident problem that required the EventBridge path originally.
+                synthetic_event = {
+                    "source": "aws.cloudwatch",
+                    "fault_class": "resource_exhaustion",
+                    "alarm_name": alarm_name,
+                    "resource_id": alarm_name,
+                    "injected_by": "demo_mode",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+                _lambda.invoke(
+                    FunctionName=collector_fn,
+                    InvocationType="Event",
+                    Payload=json.dumps(synthetic_event),
                 )
-                result = {"success": True, "method": "cloudwatch_alarm", "alarm_name": alarm_name}
+                result = {
+                    "success": True,
+                    "method": "direct_collector_invoke",
+                    "alarm_name": alarm_name,
+                    "collector_invoked": True,
+                }
             return result
 
         elif fault_class == "service_cascade":
@@ -227,23 +242,26 @@ def _inject_fault(fault_class: str) -> dict:
                     "collector_invoked": True,
                 }
             else:
-                # Deployed AWS mode: set BOTH component metric alarms so the composite
-                # alarm transitions to ALARM naturally and EventBridge fires.
-                set_alarms = []
-                for component_alarm in SERVICE_CASCADE_COMPONENT_ALARMS:
-                    _cloudwatch.set_alarm_state(
-                        AlarmName=component_alarm,
-                        StateValue="ALARM",
-                        StateReason="Demo Mode: Injected service_cascade fault (component alarm)",
-                        StateReasonData=reason_data,
-                    )
-                    set_alarms.append(component_alarm)
+                # Deployed AWS mode: direct collector invocation (same reasons as resource_exhaustion above).
+                composite_alarm = FAULT_CLASS_ALARMS["service_cascade"]
+                synthetic_event = {
+                    "source": "aws.cloudwatch",
+                    "fault_class": "service_cascade",
+                    "alarm_name": composite_alarm,
+                    "resource_id": composite_alarm,
+                    "injected_by": "demo_mode",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+                _lambda.invoke(
+                    FunctionName=collector_fn,
+                    InvocationType="Event",
+                    Payload=json.dumps(synthetic_event),
+                )
                 result = {
                     "success": True,
-                    "method": "cloudwatch_component_alarms",
-                    "component_alarms_set": set_alarms,
-                    "composite_alarm": FAULT_CLASS_ALARMS["service_cascade"],
-                    "note": "Component metric alarms set to ALARM. Composite alarm will transition automatically.",
+                    "method": "direct_collector_invoke",
+                    "composite_alarm": composite_alarm,
+                    "collector_invoked": True,
                 }
             return result
 

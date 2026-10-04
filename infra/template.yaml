@@ -1272,6 +1272,18 @@ Outputs:
     Description: Service C endpoint
     Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/service-c"
 
+  ServiceAFunctionArn:
+    Description: ARN of the Service A Lambda (retained for cross-stack compatibility with demo-control stack)
+    Value: !GetAtt ServiceAFunction.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-ServiceAFunctionArn"
+
+  ServiceCFunctionArn:
+    Description: ARN of the Service C Lambda (retained for cross-stack compatibility)
+    Value: !GetAtt ServiceCFunction.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-ServiceCFunctionArn"
+
   DashboardApiFunctionArn:
     Description: ARN of the Phase 8 read-only dashboard API Lambda
     Value: !GetAtt DashboardApiFunction.Arn

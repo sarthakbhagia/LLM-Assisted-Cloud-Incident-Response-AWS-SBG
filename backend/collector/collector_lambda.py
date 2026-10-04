@@ -334,9 +334,7 @@ def _collect_resource_exhaustion(parsed: dict, start_ms: int, end_ms: int) -> di
             evidence["logs_insights"] = synthetic["logs_insights"]
             evidence["demo_synthetic"] = True
             evidence["demo_synthetic_reason"] = (
-                "Demo mode: no real Lambda invocations occurred in the 15-minute collection window "
-                "because SetAlarmState does not trigger a Lambda execution. "
-                "This data is illustrative only and shows what a real resource-exhaustion incident would look like."
+                "Demo mode: This data is illustrative only and shows what a real resource-exhaustion incident would look like."
             )
             logger.info(json.dumps({
                 "event": "demo_synthetic_evidence_injected",
