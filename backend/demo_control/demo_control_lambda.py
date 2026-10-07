@@ -269,6 +269,7 @@ def _inject_fault(fault_class: str) -> dict:
             # Directly invoke the collector with a synthetic Config-style event.
             # This bypasses the async Config evaluation loop and makes the demo
             # reliable regardless of whether non-compliant resources exist.
+            # Use the DemoMisconfigBucket (sacrificial bucket) not the data lake bucket.
             collector_fn = os.environ.get("COLLECTOR_FUNCTION_NAME", "")
             if not collector_fn:
                 # Fallback: try Config evaluation (original behaviour)
@@ -278,11 +279,22 @@ def _inject_fault(fault_class: str) -> dict:
                 return {"success": True, "method": "config_evaluation", "config_rule": config_rule,
                         "warning": "COLLECTOR_FUNCTION_NAME not set - fell back to config evaluation"}
 
+            # Get the demo misconfig bucket name
+            demo_bucket = os.environ.get("DEMO_MISCONFIG_BUCKET")
+            if not demo_bucket:
+                try:
+                    sts = boto3.client("sts")
+                    account_id = sts.get_caller_identity()["Account"]
+                    env = os.environ.get("ENVIRONMENT", "dev")
+                    demo_bucket = f"llm-incident-demo-misconfig-{account_id}-{env}"
+                except Exception:
+                    demo_bucket = FAULT_CLASS_ALARMS["misconfiguration"]
+
             synthetic_event = {
                 "source": "aws_config",
                 "fault_class": "misconfiguration",
                 "config_rule": FAULT_CLASS_ALARMS["misconfiguration"],
-                "resource_id": os.environ.get("DATA_LAKE_BUCKET") or FAULT_CLASS_ALARMS["misconfiguration"],
+                "resource_id": demo_bucket,
                 "resource_type": "AWS::S3::Bucket",
                 "injected_by": "demo_mode",
                 "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -296,6 +308,7 @@ def _inject_fault(fault_class: str) -> dict:
                 "success": True,
                 "method": "direct_collector_invoke",
                 "config_rule": FAULT_CLASS_ALARMS["misconfiguration"],
+                "demo_bucket": demo_bucket,
             }
 
     except ClientError as exc:

@@ -134,6 +134,9 @@ def compute_aggregate_metrics(records: List[Dict[str, Any]], raw_data_map: Dict[
             "parse_failed_pct": 0.0,
             "failure_taxonomy": {},
             "rag_ablation_comparison": {},
+            "synthetic_incidents": 0,
+            "synthetic_rca_accuracy_pct": 0.0,
+            "synthetic_diagnosis_recovery_gap_pct": 0.0,
         }
 
     mttr_list = []
@@ -147,10 +150,21 @@ def compute_aggregate_metrics(records: List[Dict[str, Any]], raw_data_map: Dict[
 
     rag_true_records = []
     rag_false_records = []
+    
+    # Synthetic incident tracking
+    synthetic_count = 0
+    synthetic_rca_correct = 0
+    synthetic_high_confidence = 0
+    synthetic_gap_count = 0
 
     for rec in records:
         inc_id = rec.get("incident_id", "unknown")
         raw = raw_data_map.get(inc_id)
+        
+        # Check if this is a synthetic/demo incident
+        is_synthetic = rec.get("evidence", {}).get("demo_synthetic", False)
+        if is_synthetic:
+            synthetic_count += 1
 
         # Timestamps and MTTR
         det_at = rec.get("detected_at")
@@ -167,6 +181,8 @@ def compute_aggregate_metrics(records: List[Dict[str, Any]], raw_data_map: Dict[
         is_correct = evaluate_rca_accuracy(rec)
         if is_correct:
             rca_correct_count += 1
+            if is_synthetic:
+                synthetic_rca_correct += 1
 
         # Hallucination
         is_hallucinated = detect_hallucination(rec, raw)
@@ -184,6 +200,10 @@ def compute_aggregate_metrics(records: List[Dict[str, Any]], raw_data_map: Dict[
             high_confidence_count += 1
             if verif_status == "not_resolved":
                 gap_count += 1
+            if is_synthetic:
+                synthetic_high_confidence += 1
+                if verif_status == "not_resolved":
+                    synthetic_gap_count += 1
 
         # RAG Ablation tracking
         used_rag = rec.get("diagnosis", {}).get("used_rag", True)
@@ -205,13 +225,29 @@ def compute_aggregate_metrics(records: List[Dict[str, Any]], raw_data_map: Dict[
             "mttr_seconds": mttr if mttr is not None else "",
             "verification_status": verif_status,
             "failure_mode": f_mode,
+            "is_synthetic": is_synthetic,
         })
 
     avg_mttr = round(sum(mttr_list) / len(mttr_list), 2) if mttr_list else 0.0
-    rca_acc = round((rca_correct_count / total_incidents) * 100, 2)
+    
+    # Non-synthetic incidents (for primary metrics)
+    non_synthetic_total = total_incidents - synthetic_count
+    if non_synthetic_total > 0:
+        non_synthetic_rca_correct = rca_correct_count - synthetic_rca_correct
+        non_synthetic_high_confidence = high_confidence_count - synthetic_high_confidence
+        non_synthetic_gap = gap_count - synthetic_gap_count
+        rca_acc = round((non_synthetic_rca_correct / non_synthetic_total) * 100, 2)
+        diag_gap_pct = round((non_synthetic_gap / non_synthetic_high_confidence) * 100, 2) if non_synthetic_high_confidence > 0 else 0.0
+    else:
+        rca_acc = 0.0
+        diag_gap_pct = 0.0
+    
     hallucination_rate = round((hallucination_count / total_incidents) * 100, 2)
-    diag_gap_pct = round((gap_count / high_confidence_count) * 100, 2) if high_confidence_count > 0 else 0.0
     parse_failed_pct = round((parse_failed_count / total_incidents) * 100, 2)
+
+    # Synthetic metrics (separate bucket)
+    synthetic_rca_acc = round((synthetic_rca_correct / synthetic_count) * 100, 2) if synthetic_count > 0 else 0.0
+    synthetic_gap_pct = round((synthetic_gap_count / synthetic_high_confidence) * 100, 2) if synthetic_high_confidence > 0 else 0.0
 
     # RAG Ablation Summary
     rag_true_acc = round(sum(1 for c, _ in rag_true_records if c) / len(rag_true_records) * 100, 2) if rag_true_records else 0.0
@@ -238,5 +274,8 @@ def compute_aggregate_metrics(records: List[Dict[str, Any]], raw_data_map: Dict[
                 "accuracy_pct": rag_false_acc,
             },
         },
+        "synthetic_incidents": synthetic_count,
+        "synthetic_rca_accuracy_pct": synthetic_rca_acc,
+        "synthetic_diagnosis_recovery_gap_pct": synthetic_gap_pct,
         "runs": evaluated_runs,
     }

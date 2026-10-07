@@ -28,8 +28,8 @@ class TestFaultInjection(unittest.TestCase):
     def test_inject_misconfiguration_dry_run(self):
         res = inject_misconfiguration(environment="test", dry_run=True)
         self.assertEqual(res["fault_class"], "misconfiguration")
-        # Bucket name includes account ID and environment; verify pattern
-        self.assertTrue(res["target_resource"].startswith("llm-incident-datalake-"))
+        # Bucket name now uses the sacrificial DemoMisconfigBucket pattern
+        self.assertTrue(res["target_resource"].startswith("llm-incident-demo-misconfig-"))
         self.assertTrue(res["target_resource"].endswith("-test"))
         self.assertEqual(res["status"], "simulated_injection")
         self.assertTrue(res["dry_run"])
@@ -113,11 +113,12 @@ class TestEvaluationRunner(unittest.TestCase):
         summary = run_evaluation(num_runs=2, mock=True, output_dir=self.temp_dir)
         self.assertEqual(summary["total_incidents"], 6)
 
-        # Check generated output files
-        summary_file = os.path.join(self.temp_dir, "summary.json")
-        taxonomy_file = os.path.join(self.temp_dir, "failure_taxonomy.csv")
-        gap_file = os.path.join(self.temp_dir, "diagnosis_recovery_gap.csv")
-        runs_file = os.path.join(self.temp_dir, "raw_evaluation_runs.csv")
+        # Check generated output files (now in mock/ subfolder)
+        mock_dir = os.path.join(self.temp_dir, "mock")
+        summary_file = os.path.join(mock_dir, "summary.json")
+        taxonomy_file = os.path.join(mock_dir, "failure_taxonomy.csv")
+        gap_file = os.path.join(mock_dir, "diagnosis_recovery_gap.csv")
+        runs_file = os.path.join(mock_dir, "raw_evaluation_runs.csv")
 
         self.assertTrue(os.path.exists(summary_file))
         self.assertTrue(os.path.exists(taxonomy_file))
@@ -128,6 +129,7 @@ class TestEvaluationRunner(unittest.TestCase):
             data = json.load(f)
             self.assertEqual(data["total_incidents"], 6)
             self.assertIn("diagnosis_recovery_gap_pct", data)
+            self.assertTrue(data.get("synthetic"))
 
 
 if __name__ == "__main__":

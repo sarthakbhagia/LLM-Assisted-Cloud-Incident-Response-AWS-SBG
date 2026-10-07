@@ -95,6 +95,65 @@ Parameters:
       Leave empty to disable API key authentication (development only).
       In production, must be set to a secure random string stored in SSM.
 
+  DemoMode:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: >
+      If true, enables demo mode which allows CloudWatch alarm reset via
+      SetAlarmState for demonstration purposes. When false (production),
+      alarms recover naturally from metric changes.
+
+  CreateConfigRule:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: >
+      If true, creates an AWS Config rule (s3-bucket-level-public-access-prohibited)
+      and EventBridge rule for Config compliance changes. Default false because
+      the account may already have a Config recorder/channel. When true, the
+      Config rule monitors the DemoMisconfigBucket for public access block changes.
+
+  VerificationWaitSeconds:
+    Type: String
+    Default: "15"
+    Description: Initial wait time (seconds) before verification starts polling after remediation.
+
+  VerificationPollSeconds:
+    Type: String
+    Default: "5"
+    Description: Poll interval (seconds) between verification checks.
+
+  VerificationMaxWaitSeconds:
+    Type: String
+    Default: "60"
+    Description: Maximum total wait time (seconds) for verification polling.
+
+  VerificationProbeCount:
+    Type: String
+    Default: "5"
+    Description: Number of probe requests to Service A for active verification.
+
+  ProbeLatencyThresholdMs:
+    Type: String
+    Default: "3000"
+    Description: p95 latency threshold (ms) for active probe success.
+
+  ResourceExhaustionThresholdMs:
+    Type: String
+    Default: "50000"
+    Description: Duration threshold (ms) for resource exhaustion alarm.
+
+  FaultInjectionToken:
+    Type: String
+    Default: ""
+    NoEcho: true
+    Description: Bearer token for authenticating fault injection endpoints on Services A, B, C.
+
+Conditions:
+  CreateConfigRuleCondition: !Equals [!Ref CreateConfigRule, "true"]
+  IsDemoMode: !Equals [!Ref DemoMode, "true"]
+
 Resources:
 
   # ---------------------------------------------------------------------------
@@ -111,6 +170,95 @@ Resources:
         BlockPublicPolicy: true
         IgnorePublicAcls: true
         RestrictPublicBuckets: true
+
+  # ---------------------------------------------------------------------------
+  # Demo Misconfiguration Bucket (sacrificial, for fault injection only)
+  # ---------------------------------------------------------------------------
+  # This bucket is used exclusively for the misconfiguration fault class demo.
+  # It starts with public access block DISABLED so the injector can disable it
+  # (simulating a misconfiguration). Remediation re-enables it; verification checks it.
+  # NO public bucket policy or ACL is ever applied - only the public access block
+  # is toggled. The data-lake bucket (above) is NEVER touched by fault injection.
+  DemoMisconfigBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "llm-incident-demo-misconfig-${AWS::AccountId}-${Environment}"
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+
+  # ---------------------------------------------------------------------------
+  # Optional: AWS Config rule for s3-bucket-level-public-access-prohibited
+  # Only created when CreateConfigRule=true (account may already have a recorder)
+  # ---------------------------------------------------------------------------
+  MisconfigConfigRule:
+    Type: AWS::Config::ConfigRule
+    Condition: CreateConfigRuleCondition
+    Properties:
+      ConfigRuleName: "s3-bucket-level-public-access-prohibited"
+      Description: "Checks that S3 buckets have public access block enabled"
+      Scope:
+        ComplianceResourceTypes:
+          - "AWS::S3::Bucket"
+      Source:
+        Owner: "AWS"
+        SourceIdentifier: "S3_BUCKET_LEVEL_PUBLIC_ACCESS_PROHIBITED"
+      InputParameters: "{}"
+
+  # EventBridge rule for Config compliance changes on the DemoMisconfigBucket
+  # Triggers the collector when the bucket goes NON_COMPLIANT
+  ConfigComplianceEventRule:
+    Type: AWS::Events::Rule
+    Condition: CreateConfigRuleCondition
+    Properties:
+      Name: !Sub "incident-config-compliance-${Environment}"
+      Description: Routes Config compliance changes for DemoMisconfigBucket to collector
+      EventPattern:
+        source:
+          - "aws.config"
+        detail-type:
+          - "Config Rules Compliance Change"
+        detail:
+          messageType:
+            - "ComplianceChangeNotification"
+          newEvaluationResult:
+            complianceType:
+              - "NON_COMPLIANT"
+          resourceId:
+            - !Ref DemoMisconfigBucket
+          resourceType:
+            - "AWS::S3::Bucket"
+      Targets:
+        - Arn: !GetAtt CollectorFunction.Arn
+          Id: ConfigComplianceCollectorTarget
+          InputTransformer:
+            InputPathsMap:
+              configRuleName: "$.detail.newEvaluationResult.configRuleInvokedTime"
+              resourceId: "$.detail.resourceId"
+              resourceType: "$.detail.resourceType"
+              complianceType: "$.detail.newEvaluationResult.complianceType"
+            InputTemplate: |
+              {
+                "source": "aws_config",
+                "fault_class": "misconfiguration",
+                "config_rule": "s3-bucket-level-public-access-prohibited",
+                "resource_id": <resourceId>,
+                "resource_type": <resourceType>,
+                "compliance_type": <complianceType>
+              }
+
+  ConfigComplianceEventPermission:
+    Type: AWS::Lambda::Permission
+    Condition: CreateConfigRuleCondition
+    Properties:
+      FunctionName: !Ref CollectorFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ConfigComplianceEventRule.Arn
 
   # ---------------------------------------------------------------------------
   # Structured incident records
@@ -167,6 +315,7 @@ Resources:
                   - cloudwatch:GetMetricData
                   - cloudwatch:GetMetricStatistics
                   - cloudwatch:ListMetrics
+                  - cloudwatch:DescribeAlarms
                 Resource: '*'
               - Effect: Allow
                 Action:
@@ -185,6 +334,7 @@ Resources:
                 Action:
                   - guardduty:GetFindings
                   - guardduty:ListFindings
+                  - guardduty:ListDetectors
                 Resource: '*'
               - Effect: Allow
                 Action:
@@ -377,6 +527,21 @@ Resources:
                   - lambda:InvokeFunction
                 Resource:
                   - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${AWS::StackName}-VerificationFunction*"
+        # Demo mode: allow CloudWatch alarm reset via SetAlarmState
+        # This is needed for demo scenarios where alarms are triggered via SetAlarmState
+        # rather than real metric breaches. In production, alarms recover naturally.
+        # The code checks DEMO_MODE env var before calling SetAlarmState.
+        - Fn::If:
+            - IsDemoMode
+            - PolicyName: demo-cloudwatch-alarm-reset
+              PolicyDocument:
+                Version: '2012-10-17'
+                Statement:
+                  - Effect: Allow
+                    Action:
+                      - cloudwatch:SetAlarmState
+                    Resource: '*'
+            - Ref: "AWS::NoValue"
 
   # ===========================================================================
   # PHASE 1 - DEMO APPLICATION
@@ -419,11 +584,29 @@ Resources:
       CodeUri: ../backend/service_c/
       Handler: app.lambda_handler
       Role: !GetAtt DemoAppRole.Arn
+      Environment:
+        Variables:
+          FAULT_INJECTION_TOKEN: !Ref FaultInjectionToken
       Events:
         Api:
           Type: Api
           Properties:
             Path: /service-c
+            Method: get
+        FaultApi:
+          Type: Api
+          Properties:
+            Path: /service-c/fault
+            Method: post
+        FaultApiOptions:
+          Type: Api
+          Properties:
+            Path: /service-c/fault
+            Method: options
+        FaultApiGet:
+          Type: Api
+          Properties:
+            Path: /service-c/fault
             Method: get
 
   # ---------------------------------------------------------------------------
@@ -438,11 +621,27 @@ Resources:
       Environment:
         Variables:
           SERVICE_C_URL: !Ref ServiceCUrl
+          FAULT_INJECTION_TOKEN: !Ref FaultInjectionToken
       Events:
         Api:
           Type: Api
           Properties:
             Path: /service-b
+            Method: get
+        FaultApi:
+          Type: Api
+          Properties:
+            Path: /service-b/fault
+            Method: post
+        FaultApiOptions:
+          Type: Api
+          Properties:
+            Path: /service-b/fault
+            Method: options
+        FaultApiGet:
+          Type: Api
+          Properties:
+            Path: /service-b/fault
             Method: get
 
   # ---------------------------------------------------------------------------
@@ -457,11 +656,27 @@ Resources:
       Environment:
         Variables:
           SERVICE_B_URL: !Ref ServiceBUrl
+          FAULT_INJECTION_TOKEN: !Ref FaultInjectionToken
       Events:
         Api:
           Type: Api
           Properties:
             Path: /start
+            Method: get
+        FaultApi:
+          Type: Api
+          Properties:
+            Path: /start/fault
+            Method: post
+        FaultApiOptions:
+          Type: Api
+          Properties:
+            Path: /start/fault
+            Method: options
+        FaultApiGet:
+          Type: Api
+          Properties:
+            Path: /start/fault
             Method: get
   # =========================================================================== 
   # PHASE 2 - DETECTION
@@ -487,7 +702,7 @@ Resources:
       Period: 60
       EvaluationPeriods: 2
       DatapointsToAlarm: 2
-      Threshold: 50000
+      Threshold: !Ref ResourceExhaustionThresholdMs
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
 
@@ -700,6 +915,8 @@ Resources:
           INCIDENTS_TABLE: !Ref IncidentsTable
           DATA_LAKE_BUCKET: !Ref IncidentDataLake
           VERIFICATION_FUNCTION_NAME: !Ref VerificationFunction
+          DEMO_MODE: !Ref DemoMode
+          RESOURCE_EXHAUSTION_DURATION_THRESHOLD_MS: !Ref ResourceExhaustionThresholdMs
 
   # ===========================================================================
   # PHASE 6.5 - CLOSED-LOOP VERIFICATION (core research novelty)
@@ -720,6 +937,14 @@ Resources:
         Variables:
           INCIDENTS_TABLE: !Ref IncidentsTable
           DATA_LAKE_BUCKET: !Ref IncidentDataLake
+          DEMO_MODE: !Ref DemoMode
+          VERIFICATION_WAIT_SECONDS: !Ref VerificationWaitSeconds
+          VERIFICATION_POLL_SECONDS: !Ref VerificationPollSeconds
+          VERIFICATION_MAX_WAIT_SECONDS: !Ref VerificationMaxWaitSeconds
+          VERIFICATION_PROBE_COUNT: !Ref VerificationProbeCount
+          PROBE_LATENCY_THRESHOLD_MS: !Ref ProbeLatencyThresholdMs
+          # SERVICE_A_URL is intentionally omitted to avoid circular dependency with ServerlessRestApi.
+          # The verification lambda will use the function URL discovery fallback if not set.
 
   IncidentDataLakeConfigPolicy:
     Type: AWS::S3::BucketPolicy
@@ -1207,6 +1432,12 @@ Outputs:
     Value: !Ref IncidentDataLake
     Export:
       Name: !Sub "${AWS::StackName}-IncidentDataLakeName"
+
+  DemoMisconfigBucketName:
+    Description: Name of the sacrificial S3 bucket for misconfiguration fault injection demos
+    Value: !Ref DemoMisconfigBucket
+    Export:
+      Name: !Sub "${AWS::StackName}-DemoMisconfigBucketName"
 
   IncidentsTableName:
     Description: Name of the DynamoDB incidents table

@@ -5,7 +5,8 @@
 set -euo pipefail
 
 ENVIRONMENT="${1:-dev}"
-REGION="ap-south-1"
+# Use AWS_REGION or AWS_DEFAULT_REGION with default
+REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-ap-south-1}}"
 STACK_NAME="llm-incident-response"
 DEMO_STACK_NAME="llm-incident-response-demo-${ENVIRONMENT}"
 
@@ -30,12 +31,44 @@ echo ""
 
 # Step 3: Deploy main stack
 echo "=== Step 3: Deploying main stack (${STACK_NAME}) ==="
+
+# Read existing parameters from stack (if exists) to preserve ServiceBUrl/ServiceCUrl
+PARAM_OVERRIDES="Environment=${ENVIRONMENT}"
+
+# Check if stack exists and read current parameters
+if aws cloudformation describe-stacks --stack-name "${STACK_NAME}" --region "${REGION}" >/dev/null 2>&1; then
+    echo "Stack exists, reading current parameters..."
+    EXISTING_PARAMS=$(aws cloudformation describe-stacks \
+        --stack-name "${STACK_NAME}" \
+        --region "${REGION}" \
+        --query "Stacks[0].Parameters" \
+        --output json)
+    
+    # Extract ServiceBUrl and ServiceCUrl if present
+    SERVICE_B_URL=$(echo "${EXISTING_PARAMS}" | jq -r '.[] | select(.ParameterKey=="ServiceBUrl") | .ParameterValue')
+    SERVICE_C_URL=$(echo "${EXISTING_PARAMS}" | jq -r '.[] | select(.ParameterKey=="ServiceCUrl") | .ParameterValue')
+    
+    if [[ "${SERVICE_B_URL}" != "null" && -n "${SERVICE_B_URL}" ]]; then
+        PARAM_OVERRIDES="${PARAM_OVERRIDES} ServiceBUrl=${SERVICE_B_URL}"
+    fi
+    if [[ "${SERVICE_C_URL}" != "null" && -n "${SERVICE_C_URL}" ]]; then
+        PARAM_OVERRIDES="${PARAM_OVERRIDES} ServiceCUrl=${SERVICE_C_URL}"
+    fi
+fi
+
+# Add DemoMode and FaultInjectionToken
+PARAM_OVERRIDES="${PARAM_OVERRIDES} DemoMode=false"
+# FaultInjectionToken should be set via environment variable or SSM
+if [[ -n "${FAULT_INJECTION_TOKEN:-}" ]]; then
+    PARAM_OVERRIDES="${PARAM_OVERRIDES} FaultInjectionToken=${FAULT_INJECTION_TOKEN}"
+fi
+
 sam deploy \
     --template-file infra/template.yaml \
     --stack-name "${STACK_NAME}" \
     --region "${REGION}" \
     --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
-    --parameter-overrides Environment="${ENVIRONMENT}" \
+    --parameter-overrides ${PARAM_OVERRIDES} \
     --no-fail-on-empty-changeset
 echo "Main stack deployed"
 echo ""
@@ -83,7 +116,7 @@ To configure frontend for deployed environment, create frontend/.env with:
 
 VITE_API_BASE_URL=${DASHBOARD_API_URL}
 VITE_DEMO_API_BASE_URL=${DEMO_API_URL}
-VITE_AWS_REGION=ap-south-1
+VITE_AWS_REGION=${REGION}
 VITE_ENVIRONMENT=${ENVIRONMENT}
 
 Then run:

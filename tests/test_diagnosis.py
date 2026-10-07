@@ -24,11 +24,13 @@ class TestDiagnosisLambda(Fixture):
     def test_runbook_loader(self):
         from runbook_loader import load_runbook
 
-        content = load_runbook("resource_exhaustion")
+        content, source = load_runbook("resource_exhaustion")
         self.assertIn("Resource Exhaustion", content)
+        self.assertIn(source, ("local", "packaged", "s3", "none"))
 
-        content_unknown = load_runbook("unknown_class")
+        content_unknown, source_unknown = load_runbook("unknown_class")
         self.assertIn("Default Runbook", content_unknown)
+        self.assertEqual(source_unknown, "none")
 
     def test_diagnosis_flow(self):
         mod = self.load_handler(
@@ -39,6 +41,10 @@ class TestDiagnosisLambda(Fixture):
             },
         )
         self.set_table(self.aws["dynamodb.resource"], mock.MagicMock())
+
+        # Mock S3 get_object for runbook_loader (returns NoSuchKey to fall back to local)
+        runbook_key = "runbooks/resource_exhaustion.md"
+        self.set_bucket(self.aws["s3"], {runbook_key: ""})  # Empty triggers NoSuchKey in fake
 
         with (
             mock.patch.object(mod, "_fetch_s3_raw_data") as mock_s3,
@@ -280,6 +286,10 @@ class TestDiagnosisLambda(Fixture):
             },
         )
         self.set_table(self.aws["dynamodb.resource"], mock.MagicMock())
+
+        # Mock S3 get_object for runbook_loader (returns NoSuchKey to fall back to local)
+        runbook_key = "runbooks/resource_exhaustion.md"
+        self.set_bucket(self.aws["s3"], {runbook_key: ""})
 
         # Mock S3 client for saving raw response
         mock_s3_client = mock.MagicMock()

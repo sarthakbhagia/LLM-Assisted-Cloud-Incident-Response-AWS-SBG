@@ -118,14 +118,49 @@ def lambda_handler(event, context):
     # 5. Update DynamoDB with the outcome
     now = datetime.now(timezone.utc).isoformat()
     new_remediation_status = "executed" if result["success"] else "failed"
-    _update_remediation_record(incident_id, new_remediation_status, result["action_key"], result["notes"], now)
+    
+    # Store before_state if available (for misconfiguration S3 check)
+    update_kwargs = {
+        "incident_id": incident_id,
+        "new_status": new_remediation_status,
+        "action_taken": result["action_key"],
+        "notes": result["notes"],
+        "executed_at": now,
+    }
+    if result.get("before_state") is not None:
+        update_kwargs["before_state"] = result["before_state"]
+    
+    _update_remediation_record(**update_kwargs)
+
+    # GATING: Skip verification if remediation failed or was manual_review_required
+    if not result["success"] or action_key == "manual_review_required":
+        logger.info(json.dumps({
+            "event": "verification_skipped",
+            "incident_id": incident_id,
+            "reason": "remediation_failed" if not result["success"] else "manual_review_required",
+            "action_key": action_key,
+        }))
+        return {
+            "statusCode": 200,
+            "body": json.dumps({
+                "incident_id": incident_id,
+                "action_key": action_key,
+                "success": result["success"],
+                "new_status": new_remediation_status,
+                "notes": result["notes"],
+                "verification_skipped": True,
+            }),
+        }
 
     # 6. Build original_signal payload (thresholds from template.yaml - hardcoded to avoid
     #    needing DescribeAlarms; these must match the alarm definitions in template.yaml)
     original_signal = _build_original_signal(record)
 
-    # 7. Async-invoke verification Lambda (Phase 6.5)
-    _invoke_verification(incident_id, fault_class, original_signal)
+    # 7. Async-invoke verification Lambda (Phase 6.5) with remediation completion timestamp
+    # Pass alarm_reset and evidence_synthetic for verification gating
+    alarm_reset = result.get("alarm_reset", False)
+    evidence_synthetic = record.get("diagnosis", {}).get("evidence_synthetic", False)
+    _invoke_verification(incident_id, fault_class, original_signal, now, alarm_reset, evidence_synthetic, action_key)
 
     return {
         "statusCode": 200,
@@ -171,23 +206,30 @@ def _update_remediation_record(
     action_taken: str,
     notes: str,
     executed_at: str,
+    before_state: dict | None = None,
 ) -> None:
     try:
+        update_expr = (
+            "SET remediation.#st = :status, "
+            "remediation.action_taken = :action, "
+            "remediation.executed_at = :executed_at, "
+            "remediation.notes = :notes"
+        )
+        expr_vals = {
+            ":status": new_status,
+            ":action": action_taken,
+            ":executed_at": executed_at,
+            ":notes": notes,
+        }
+        if before_state is not None:
+            update_expr += ", remediation.before_state = :before_state"
+            expr_vals[":before_state"] = before_state
+        
         _dynamodb.Table(INCIDENTS_TABLE).update_item(
             Key={"incident_id": incident_id},
-            UpdateExpression=(
-                "SET remediation.#st = :status, "
-                "remediation.action_taken = :action, "
-                "remediation.executed_at = :executed_at, "
-                "remediation.notes = :notes"
-            ),
+            UpdateExpression=update_expr,
             ExpressionAttributeNames={"#st": "status"},
-            ExpressionAttributeValues={
-                ":status": new_status,
-                ":action": action_taken,
-                ":executed_at": executed_at,
-                ":notes": notes,
-            },
+            ExpressionAttributeValues=expr_vals,
         )
         logger.info(json.dumps({
             "event": "dynamodb_remediation_updated",
@@ -249,10 +291,11 @@ def _build_original_signal(record: dict) -> dict:
         # Fall back to resource_id only for legacy records that pre-date this field.
         stored_config_rule = record.get("config_rule") or resource_id
         diagnosis = record.get("diagnosis") or {}
-        affected = diagnosis.get("affected_resources") or []
+        # Use record's resource_type if available, otherwise default to S3 Bucket for misconfiguration
+        resource_type = record.get("resource_type") or "AWS::S3::Bucket"
         signal["config_rule"] = stored_config_rule
         signal["resource_id"] = resource_id   # bucket name - used by the S3 direct-check fallback
-        signal["resource_type"] = affected[0] if affected else None
+        signal["resource_type"] = resource_type
 
 
     elif fault_class == "service_cascade":
@@ -272,7 +315,7 @@ def _build_original_signal(record: dict) -> dict:
 # Verification Lambda invocation
 # ===========================================================================
 
-def _invoke_verification(incident_id: str, fault_class: str, original_signal: dict) -> None:
+def _invoke_verification(incident_id: str, fault_class: str, original_signal: dict, remediation_completed_at: str, alarm_reset: bool = False, evidence_synthetic: bool = False, action_key: str = "") -> None:
     if not VERIFICATION_FUNCTION_NAME:
         logger.warning(json.dumps({
             "event": "verification_invoke_skipped",
@@ -285,6 +328,10 @@ def _invoke_verification(incident_id: str, fault_class: str, original_signal: di
         "incident_id": incident_id,
         "fault_class": fault_class,
         "original_signal": original_signal,
+        "remediation_completed_at": remediation_completed_at,
+        "alarm_reset": alarm_reset,
+        "evidence_synthetic": evidence_synthetic,
+        "action_key": action_key,
     }
     try:
         _lambda.invoke(
@@ -296,6 +343,9 @@ def _invoke_verification(incident_id: str, fault_class: str, original_signal: di
             "event": "verification_invoked",
             "incident_id": incident_id,
             "function": VERIFICATION_FUNCTION_NAME,
+            "remediation_completed_at": remediation_completed_at,
+            "alarm_reset": alarm_reset,
+            "evidence_synthetic": evidence_synthetic,
         }))
     except ClientError as exc:
         # Log but do not raise - remediation has already executed and been recorded.

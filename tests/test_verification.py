@@ -35,7 +35,7 @@ class TestVerificationLambda(Fixture):
             mock.patch.object(mod, "_recheck_signal") as mock_recheck,
             mock.patch.object(mod, "_update_verification_record") as mock_update_db,
         ):
-            mock_recheck.return_value = ("resolved", "CloudWatch Metric Duration", "Metric below threshold")
+            mock_recheck.return_value = ("resolved", "CloudWatch Metric Duration", "Metric below threshold", "metric")
 
             event = {
                 "incident_id": "inc-1",
@@ -46,6 +46,7 @@ class TestVerificationLambda(Fixture):
             self.assertEqual(res["statusCode"], 200)
             body = json.loads(res["body"])
             self.assertEqual(body["verification_status"], "resolved")
+            self.assertEqual(body["evidence_type"], "metric")
             self.assertTrue(mock_update_db.called)
 
 

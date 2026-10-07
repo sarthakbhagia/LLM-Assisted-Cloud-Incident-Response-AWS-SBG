@@ -3,7 +3,7 @@ actions.py - Phase 6: Remediation Actions
 
 One function per action key from the diagnosis contract.
 Each function receives the full incident record and returns:
-    {"success": bool, "action_key": str, "notes": str}
+    {"success": bool, "action_key": str, "notes": str, "alarm_reset": bool}
 
 Design notes:
 - All functions are Lambda-based. The demo app uses Lambda, not ECS.
@@ -38,6 +38,10 @@ _s3 = boto3.client("s3")
 _iam = boto3.client("iam")
 _cw = boto3.client("cloudwatch")
 
+# Demo mode flag - if true, reset CloudWatch alarms after remediation
+DEMO_MODE = os.environ.get("DEMO_MODE", "false").lower() == "true"
+
+
 # ---------------------------------------------------------------------------
 # Pre-defined safe deny policy for tighten_iam_policy.
 # This is a MODULE CONSTANT - never generated from LLM output.
@@ -63,23 +67,24 @@ _SAFE_DENY_POLICY_NAME = "IncidentResponseSafeDenyPolicy"
 
 
 # ===========================================================================
-# Helper: reset a CloudWatch alarm to OK after remediation
+# Helper: reset a CloudWatch alarm to OK after remediation (DEMO MODE ONLY)
 # ===========================================================================
 
-def _reset_cloudwatch_alarm(alarm_name: str, reason: str = "Remediation executed") -> None:
+def _reset_cloudwatch_alarm(alarm_name: str, reason: str = "Remediation executed") -> bool:
     """
     Reset a CloudWatch alarm to OK state after a remediation action succeeds.
-
-    This is required for the demo because the alarm was placed into ALARM via
-    SetAlarmState (no real metric breach). The verification lambda re-checks the
-    alarm state to confirm the fix worked; if we never reset it, it stays ALARM
-    and verification always returns not_resolved.
-
-    In a production deployment the alarm would return to OK naturally once the
-    underlying metric recovers. For the demo we simulate that recovery here.
+    
+    This is ONLY used in DEMO_MODE. In production, the alarm would return to OK
+    naturally once the underlying metric recovers. For the demo we simulate that
+    recovery here because the alarm was placed into ALARM via SetAlarmState
+    (no real metric breach).
+    
+    Returns True if alarm was reset, False otherwise.
     """
+    if not DEMO_MODE:
+        return False
     if not alarm_name:
-        return
+        return False
     try:
         _cw.set_alarm_state(
             AlarmName=alarm_name,
@@ -96,6 +101,7 @@ def _reset_cloudwatch_alarm(alarm_name: str, reason: str = "Remediation executed
             "alarm_name": alarm_name,
             "reason": reason,
         }))
+        return True
     except ClientError as exc:
         # Non-fatal - verification will fall back to inconclusive rather than failing hard
         logger.warning(json.dumps({
@@ -103,6 +109,7 @@ def _reset_cloudwatch_alarm(alarm_name: str, reason: str = "Remediation executed
             "alarm_name": alarm_name,
             "error": str(exc),
         }))
+        return False
 
 
 # ===========================================================================
@@ -203,6 +210,7 @@ def scale_up(incident_record: dict) -> dict:
             "success": False,
             "action_key": action_key,
             "notes": "Could not resolve target Lambda function name from incident record.",
+            "alarm_reset": False,
         }
 
     try:
@@ -222,8 +230,9 @@ def scale_up(incident_record: dict) -> dict:
                 "new_concurrency": new_concurrency,
             }))
             # Reset the triggering alarm to OK so verification can confirm resolution.
+            # ONLY in DEMO_MODE - in production the alarm recovers naturally.
             alarm_name = (incident_record.get("resource_id") or "")
-            _reset_cloudwatch_alarm(
+            alarm_reset = _reset_cloudwatch_alarm(
                 alarm_name,
                 reason=f"scale_up applied to {function_name} (concurrency {new_concurrency})",
             )
@@ -234,6 +243,7 @@ def scale_up(incident_record: dict) -> dict:
                     f"Set reserved concurrency for '{function_name}' to {new_concurrency} "
                     f"(was: {'uncapped' if current is None else current})."
                 ),
+                "alarm_reset": alarm_reset,
             }
         except ClientError as put_exc:
             error_code = put_exc.response.get("Error", {}).get("Code", "")
@@ -248,7 +258,7 @@ def scale_up(incident_record: dict) -> dict:
                 }))
                 _lambda_client.delete_function_concurrency(FunctionName=function_name)
                 alarm_name = (incident_record.get("resource_id") or "")
-                _reset_cloudwatch_alarm(
+                alarm_reset = _reset_cloudwatch_alarm(
                     alarm_name,
                     reason=f"scale_up applied to {function_name} (reserved limit removed, now draws from unreserved pool)",
                 )
@@ -260,12 +270,13 @@ def scale_up(incident_record: dict) -> dict:
                         "(account unreserved floor prevented setting a higher value; "
                         "function now draws from unreserved pool - effectively uncapped)."
                     ),
+                    "alarm_reset": alarm_reset,
                 }
             raise  # re-raise unexpected ClientErrors
 
     except ClientError as exc:
         logger.error(json.dumps({"event": "scale_up_error", "function": function_name, "error": str(exc)}))
-        return {"success": False, "action_key": action_key, "notes": f"ClientError during scale_up: {exc}"}
+        return {"success": False, "action_key": action_key, "notes": f"ClientError during scale_up: {exc}", "alarm_reset": False}
 
 
 # ===========================================================================
@@ -315,7 +326,7 @@ def _bump_lambda_env(function_name: str, action_key: str, incident_record: dict 
     Shared implementation: read current env vars, set RESTART_TRIGGER to
     the current UTC ISO8601 timestamp, write back via UpdateFunctionConfiguration.
     After a successful update, resets the relevant CloudWatch alarm(s) to OK so
-    the verification lambda sees a healthy signal.
+    the verification lambda sees a healthy signal (DEMO_MODE only).
     """
     incident_record = incident_record or {}
     try:
@@ -335,24 +346,26 @@ def _bump_lambda_env(function_name: str, action_key: str, incident_record: dict 
             "trigger_value": trigger_value,
         }))
         # Reset the triggering alarm to OK so verification sees a healthy signal.
+        # ONLY in DEMO_MODE - in production the alarm recovers naturally.
         # For service_cascade, reset both component alarms that feed the composite.
         fault_class = incident_record.get("fault_class") or ""
         alarm_name = (incident_record.get("resource_id") or "")
+        alarm_reset = False
         if fault_class == "service_cascade" or "cascade" in action_key:
             env = os.environ.get("ENVIRONMENT", "dev")
-            _reset_cloudwatch_alarm(
+            alarm_reset = _reset_cloudwatch_alarm(
                 f"incident-service-a-errors-{env}",
                 reason=f"restart_downstream_service applied to {function_name}",
-            )
-            _reset_cloudwatch_alarm(
+            ) or alarm_reset
+            alarm_reset = _reset_cloudwatch_alarm(
                 f"incident-service-c-latency-{env}",
                 reason=f"restart_downstream_service applied to {function_name}",
-            )
+            ) or alarm_reset
         # Always reset the primary alarm stored in resource_id (composite or metric alarm)
-        _reset_cloudwatch_alarm(
+        alarm_reset = _reset_cloudwatch_alarm(
             alarm_name,
             reason=f"{action_key} applied to {function_name}",
-        )
+        ) or alarm_reset
         return {
             "success": True,
             "action_key": action_key,
@@ -360,10 +373,11 @@ def _bump_lambda_env(function_name: str, action_key: str, incident_record: dict 
                 f"Bumped RESTART_TRIGGER env var on '{function_name}' to '{trigger_value}'. "
                 "Existing warm Lambda execution environments will be discarded."
             ),
+            "alarm_reset": alarm_reset,
         }
     except ClientError as exc:
         logger.error(json.dumps({"event": "restart_error", "function": function_name, "error": str(exc)}))
-        return {"success": False, "action_key": action_key, "notes": f"ClientError during restart: {exc}"}
+        return {"success": False, "action_key": action_key, "notes": f"ClientError during restart: {exc}", "alarm_reset": False}
 
 
 # ===========================================================================
@@ -375,6 +389,7 @@ def lock_s3_bucket(incident_record: dict) -> dict:
     Apply a full public access block to the flagged S3 bucket.
     Bucket name is taken from diagnosis.affected_resources[0],
     falling back to resource_id if not present.
+    Returns before_state (public access block config before the change).
     """
     action_key = "lock_s3_bucket"
     resources = (incident_record.get("diagnosis") or {}).get("affected_resources") or []
@@ -385,11 +400,34 @@ def lock_s3_bucket(incident_record: dict) -> dict:
             "success": False,
             "action_key": action_key,
             "notes": "No S3 bucket name found in diagnosis.affected_resources or resource_id.",
+            "alarm_reset": False,
+            "before_state": None,
         }
 
     # Strip ARN prefix if the LLM returned arn:aws:s3:::bucket-name
     if bucket_name.startswith("arn:aws:s3:::"):
         bucket_name = bucket_name[len("arn:aws:s3:::"):]
+
+    # Get public access block state BEFORE the change
+    before_state = None
+    try:
+        resp = _s3.get_public_access_block(Bucket=bucket_name)
+        before_state = resp.get("PublicAccessBlockConfiguration", {})
+    except ClientError as exc:
+        error_code = exc.response.get("Error", {}).get("Code", "")
+        if error_code == "NoSuchPublicAccessBlockConfiguration":
+            before_state = {
+                "BlockPublicAcls": False,
+                "IgnorePublicAcls": False,
+                "BlockPublicPolicy": False,
+                "RestrictPublicBuckets": False,
+            }
+        else:
+            logger.warning(json.dumps({
+                "event": "lock_s3_before_state_error",
+                "bucket": bucket_name,
+                "error": str(exc),
+            }))
 
     try:
         _s3.put_public_access_block(
@@ -401,7 +439,7 @@ def lock_s3_bucket(incident_record: dict) -> dict:
                 "RestrictPublicBuckets": True,
             },
         )
-        logger.info(json.dumps({"event": "lock_s3_applied", "bucket": bucket_name}))
+        logger.info(json.dumps({"event": "lock_s3_applied", "bucket": bucket_name, "before_state": before_state}))
         return {
             "success": True,
             "action_key": action_key,
@@ -409,10 +447,12 @@ def lock_s3_bucket(incident_record: dict) -> dict:
                 f"Applied full public access block to S3 bucket '{bucket_name}'. "
                 "BlockPublicAcls, IgnorePublicAcls, BlockPublicPolicy, RestrictPublicBuckets all set to True."
             ),
+            "alarm_reset": False,
+            "before_state": before_state,
         }
     except ClientError as exc:
         logger.error(json.dumps({"event": "lock_s3_error", "bucket": bucket_name, "error": str(exc)}))
-        return {"success": False, "action_key": action_key, "notes": f"ClientError during lock_s3_bucket: {exc}"}
+        return {"success": False, "action_key": action_key, "notes": f"ClientError during lock_s3_bucket: {exc}", "alarm_reset": False, "before_state": before_state}
 
 
 # ===========================================================================
@@ -546,6 +586,7 @@ def tighten_iam_policy(incident_record: dict) -> dict:
                 "Policy denies iam:*, organizations:*, account:* actions on all resources. "
                 "Policy JSON was NOT generated from LLM output."
             ),
+            "alarm_reset": False,
         }
     except _iam.exceptions.NoSuchEntityException:
         # Role doesn't exist - try fallback
@@ -560,6 +601,7 @@ def tighten_iam_policy(incident_record: dict) -> dict:
                 "success": False,
                 "action_key": action_key,
                 "notes": f"IAM role '{role_name}' not found and no fallback role available.",
+                "alarm_reset": False,
             }
         try:
             _iam.put_role_policy(
@@ -576,13 +618,14 @@ def tighten_iam_policy(incident_record: dict) -> dict:
                     f"(original candidate '{role_name}' was not found; resolved via account lookup). "
                     "Policy JSON was NOT generated from LLM output."
                 ),
+                "alarm_reset": False,
             }
         except ClientError as exc2:
             logger.error(json.dumps({"event": "tighten_iam_fallback_error", "role": fallback, "error": str(exc2)}))
-            return {"success": False, "action_key": action_key, "notes": f"ClientError on fallback role '{fallback}': {exc2}"}
+            return {"success": False, "action_key": action_key, "notes": f"ClientError on fallback role '{fallback}': {exc2}", "alarm_reset": False}
     except ClientError as exc:
         logger.error(json.dumps({"event": "tighten_iam_error", "role": role_name, "error": str(exc)}))
-        return {"success": False, "action_key": action_key, "notes": f"ClientError during tighten_iam_policy: {exc}"}
+        return {"success": False, "action_key": action_key, "notes": f"ClientError during tighten_iam_policy: {exc}", "alarm_reset": False}
 
 
 # ===========================================================================
@@ -604,4 +647,5 @@ def manual_review_required(incident_record: dict) -> dict:
             "The LLM diagnosis indicated automated remediation is not safe or applicable. "
             "No automated action was taken."
         ),
+        "alarm_reset": False,
     }

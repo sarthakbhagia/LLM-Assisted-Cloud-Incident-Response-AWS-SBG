@@ -11,6 +11,50 @@ logger.setLevel(logging.INFO)
 
 DOWNSTREAM_TIMEOUT_SECONDS = 5
 
+# Module-level fault state for Service B
+_FAULT_STATE = {
+    "latency_ms": 0,
+    "error_rate": 0.0,
+    "error_type": "timeout",
+    "enabled": False,
+}
+
+_FAULT_INJECTION_TOKEN = os.environ.get("FAULT_INJECTION_TOKEN", "")
+
+
+def _verify_fault_token(event):
+    """Verify the fault injection token from Authorization header."""
+    if not _FAULT_INJECTION_TOKEN:
+        return False
+    auth_header = event.get("headers", {}).get("authorization") or event.get("headers", {}).get("Authorization")
+    if not auth_header:
+        return False
+    parts = auth_header.split()
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        return False
+    return parts[1] == _FAULT_INJECTION_TOKEN
+
+
+def _inject_fault():
+    """Apply fault injection based on current fault state."""
+    import random
+    if not _FAULT_STATE["enabled"]:
+        return None
+    
+    if _FAULT_STATE["latency_ms"] > 0:
+        time.sleep(_FAULT_STATE["latency_ms"] / 1000.0)
+    
+    if _FAULT_STATE["error_rate"] > 0 and random.random() < _FAULT_STATE["error_rate"]:
+        error_type = _FAULT_STATE["error_type"]
+        if error_type == "timeout":
+            raise TimeoutError("Simulated Service B timeout")
+        elif error_type == "500":
+            raise RuntimeError("Simulated Service B internal error")
+        elif error_type == "connection":
+            raise ConnectionError("Simulated Service B connection error")
+    
+    return None
+
 
 def _call_service(url):
     started_at = time.perf_counter()
@@ -52,6 +96,16 @@ def _call_service(url):
 
 
 def lambda_handler(event, context):
+    # Check for fault injection management endpoint
+    path = event.get("path", "") or event.get("rawPath", "")
+    method = event.get("httpMethod", "") or event.get("requestContext", {}).get("http", {}).get("method", "")
+    
+    if path == "/service-b/fault" and method in ("POST", "GET"):
+        return _handle_fault_management(event, method)
+    
+    # Apply fault injection
+    _inject_fault()
+    
     service_c_url = os.environ.get("SERVICE_C_URL")
     if not service_c_url:
         logger.error("SERVICE_C_URL is not configured")
@@ -76,6 +130,69 @@ def lambda_handler(event, context):
         "overall_status": "failure",
     }
     return _json_response(504 if status_code is None else 502, response)
+
+
+def _handle_fault_management(event, method):
+    """Handle fault injection configuration via authenticated endpoint."""
+    if not _verify_fault_token(event):
+        return {
+            "statusCode": 401,
+            "headers": {"Content-Type": "application/json"},
+            "body": json.dumps({"error": "Unauthorized: invalid or missing fault injection token"}),
+        }
+    
+    if method == "GET":
+        return {
+            "statusCode": 200,
+            "headers": {"Content-Type": "application/json"},
+            "body": json.dumps({
+                "fault_state": _FAULT_STATE,
+            }),
+        }
+    
+    try:
+        body = json.loads(event.get("body", "{}") or "{}")
+    except json.JSONDecodeError:
+        return {
+            "statusCode": 400,
+            "headers": {"Content-Type": "application/json"},
+            "body": json.dumps({"error": "Invalid JSON body"}),
+        }
+    
+    if "latency_ms" in body:
+        latency = int(body["latency_ms"])
+        if latency < 0 or latency > 30000:
+            return _error_response(400, "latency_ms must be between 0 and 30000")
+        _FAULT_STATE["latency_ms"] = latency
+    
+    if "error_rate" in body:
+        error_rate = float(body["error_rate"])
+        if error_rate < 0.0 or error_rate > 1.0:
+            return _error_response(400, "error_rate must be between 0.0 and 1.0")
+        _FAULT_STATE["error_rate"] = error_rate
+    
+    if "error_type" in body:
+        error_type = body["error_type"]
+        if error_type not in ("timeout", "500", "connection"):
+            return _error_response(400, "error_type must be one of: timeout, 500, connection")
+        _FAULT_STATE["error_type"] = error_type
+    
+    if "enabled" in body:
+        _FAULT_STATE["enabled"] = bool(body["enabled"])
+    
+    logger.info(json.dumps({
+        "event": "fault_state_updated",
+        "fault_state": _FAULT_STATE,
+    }))
+    
+    return {
+        "statusCode": 200,
+        "headers": {"Content-Type": "application/json"},
+        "body": json.dumps({
+            "success": True,
+            "fault_state": _FAULT_STATE,
+        }),
+    }
 
 
 def _json_response(status_code, body):

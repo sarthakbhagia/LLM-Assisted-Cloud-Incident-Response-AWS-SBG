@@ -2,6 +2,9 @@
 """
 Fault Injection Script: Misconfiguration
 Simulates or removes S3 Public Access Block or emits AWS Config non-compliance event.
+
+Uses the DemoMisconfigBucket (sacrificial bucket) by default, NOT the data lake bucket.
+The data lake bucket is NEVER touched by fault injection.
 """
 
 import argparse
@@ -29,20 +32,12 @@ def inject_misconfiguration(
 ) -> dict:
     env = environment
     if not bucket_name:
-        if env != "dev":
-            try:
-                account_id = boto3.client("sts", region_name=region).get_caller_identity()["Account"]
-            except Exception:
-                account_id = "123456789012"
-            bucket_name = f"llm-incident-datalake-{account_id}-{env}"
-        else:
-            bucket_name = os.environ.get("DATA_LAKE_BUCKET")
-    if not bucket_name:
+        # Use the sacrificial DemoMisconfigBucket by default
         try:
             account_id = boto3.client("sts", region_name=region).get_caller_identity()["Account"]
         except Exception:
             account_id = "123456789012"
-        bucket_name = f"llm-incident-datalake-{account_id}-{env}"
+        bucket_name = f"llm-incident-demo-misconfig-{account_id}-{env}"
     target_bucket = bucket_name
     injected_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
 

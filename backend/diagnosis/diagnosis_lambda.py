@@ -143,13 +143,23 @@ def lambda_handler(event, context):
             "body": json.dumps({"error": str(exc), "incident_id": incident_id}),
         }
 
+    # Check if evidence is synthetic (demo mode)
+    evidence_synthetic = raw_data.get("evidence", {}).get("demo_synthetic", False)
+
     # 2. Load runbook context (if RAG enabled)
     runbook_text = None
+    runbook_source = "none"
     if used_rag:
-        runbook_text = load_runbook(fault_class)
+        runbook_text, runbook_source = load_runbook(fault_class)
+    
+    # Store used_rag as (request flag AND runbook_source != "none")
+    # When runbook_source is "none", pass runbook_text=None so the prompt uses the no-runbook branch
+    effective_used_rag = used_rag and runbook_source != "none"
+    if not effective_used_rag:
+        runbook_text = None
 
-    # 3. Construct prompt
-    user_prompt = build_diagnosis_prompt(raw_data, runbook_text)
+    # 3. Construct prompt (with synthetic evidence note if applicable)
+    user_prompt = build_diagnosis_prompt(raw_data, runbook_text, evidence_synthetic)
 
     # 4. Invoke Bedrock LLM with JSON validation & 1-retry fallback
     diagnosis_output, failure_mode = _invoke_llm_with_validation(
@@ -158,6 +168,11 @@ def lambda_handler(event, context):
         raw_data=raw_data,
         incident_id=incident_id,
     )
+
+    # Add evidence_synthetic flag and runbook_source to diagnosis output for storage
+    diagnosis_output["evidence_synthetic"] = evidence_synthetic
+    diagnosis_output["runbook_source"] = runbook_source
+    diagnosis_output["used_rag"] = effective_used_rag
 
     # 5. Update DynamoDB IncidentRecord
     _update_dynamodb_diagnosis(incident_id, diagnosis_output, used_rag, failure_mode)
@@ -833,7 +848,9 @@ def _generate_fallback_diagnosis(fault_class: str, raw_data: dict) -> dict:
         }
 
     if fault_class == "misconfiguration":
-        config_rule = evidence.get("config_rule", "")
+        # Use detection_event for config_rule (not evidence)
+        detection_event = raw_data.get("detection_event", {})
+        config_rule = detection_event.get("config_rule", "")
         if "PUBLIC" in config_rule or "S3" in config_rule:
             action = "lock_s3_bucket"
         elif "ADMIN" in config_rule or "IAM" in config_rule:
@@ -915,7 +932,9 @@ def _update_dynamodb_diagnosis(
                 "diagnosis.#ds = :ds, "
                 "diagnosis.#mu = :mu, "
                 "diagnosis.#ih = :ih, "
-                "diagnosis.#rs = :rs"
+                "diagnosis.#rs = :rs, "
+                "diagnosis.#es = :es, "
+                "diagnosis.#rbs = :rbs"
             ),
             ExpressionAttributeNames={
                 "#rc": "root_cause",
@@ -930,6 +949,8 @@ def _update_dynamodb_diagnosis(
                 "#mu": "model_used",
                 "#ih": "is_heuristic",
                 "#rs": "recommended_solutions",
+                "#es": "evidence_synthetic",
+                "#rbs": "runbook_source",
             },
             ExpressionAttributeValues={
                 ":rc": diagnosis_output["root_cause"],
@@ -944,6 +965,8 @@ def _update_dynamodb_diagnosis(
                 ":mu": diagnosis_output.get("model_used", BEDROCK_MODEL_ID),
                 ":ih": bool(diagnosis_output.get("is_heuristic", False)),
                 ":rs": rs_for_ddb,
+                ":es": diagnosis_output.get("evidence_synthetic", False),
+                ":rbs": diagnosis_output.get("runbook_source", "none"),
             },
             ConditionExpression="attribute_exists(incident_id)"
         )

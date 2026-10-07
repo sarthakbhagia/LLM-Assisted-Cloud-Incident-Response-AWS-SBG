@@ -101,6 +101,8 @@ Resources:
             Fn::ImportValue: !Sub "${MainStackName}-CollectorFunctionArn"
           DATA_LAKE_BUCKET:
             Fn::ImportValue: !Sub "${MainStackName}-IncidentDataLakeName"
+          DEMO_MISCONFIG_BUCKET:
+            Fn::ImportValue: !Sub "${MainStackName}-DemoMisconfigBucketName"
       Events:
         DemoInject:
           Type: Api

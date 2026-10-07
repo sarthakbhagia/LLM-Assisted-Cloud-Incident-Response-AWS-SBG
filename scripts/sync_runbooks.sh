@@ -5,8 +5,15 @@
 set -euo pipefail
 
 ENVIRONMENT="${1:-dev}"
-REGION="ap-south-1"
-ACCOUNT_ID="889081505756"
+# Use AWS_REGION or AWS_DEFAULT_REGION with default
+REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-ap-south-1}}"
+
+# Get account ID from AWS STS
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text 2>/dev/null) || {
+    echo "ERROR: Failed to get AWS account ID. Make sure AWS credentials are configured."
+    exit 1
+}
+
 BUCKET="llm-incident-datalake-${ACCOUNT_ID}-${ENVIRONMENT}"
 SOURCE_DIR="knowledge_base"
 DEST_PREFIX="runbooks"
@@ -14,6 +21,7 @@ DEST_PREFIX="runbooks"
 echo "Syncing runbooks from ${SOURCE_DIR}/ to s3://${BUCKET}/${DEST_PREFIX}/"
 echo "Environment: ${ENVIRONMENT}"
 echo "Region: ${REGION}"
+echo "Account ID: ${ACCOUNT_ID}"
 echo "Bucket: ${BUCKET}"
 
 # Check if source directory exists

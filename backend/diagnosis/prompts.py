@@ -57,7 +57,7 @@ RULES:
 """
 
 
-def build_diagnosis_prompt(raw_data: dict, runbook_text: str | None = None) -> str:
+def build_diagnosis_prompt(raw_data: dict, runbook_text: str | None = None, evidence_synthetic: bool = False) -> str:
     """Build the user prompt combining incident evidence and optional runbook context."""
     fault_class = raw_data.get("fault_class", "unknown")
     incident_id = raw_data.get("incident_id", "unknown")
@@ -73,6 +73,13 @@ def build_diagnosis_prompt(raw_data: dict, runbook_text: str | None = None) -> s
         json.dumps(evidence, indent=2, default=str),
         "",
     ]
+
+    if evidence_synthetic:
+        prompt_parts.extend([
+            "⚠️ IMPORTANT: The above evidence is SYNTHETIC (demo mode). It was generated for demonstration purposes",
+            "and does not represent real production telemetry. Factor this into your confidence assessment.",
+            "",
+        ])
 
     if runbook_text:
         prompt_parts.extend([
